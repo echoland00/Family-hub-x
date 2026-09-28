@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow read/write to any authenticated user (anonymous works).
+    // Future: restrict to specific family member emails:
+    //   && request.auth.token.email in ['nigel@gmail.com', 'wife@gmail.com']
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
