@@ -1282,6 +1282,16 @@ export default function App() {
     ...prev,
     eca_recurring: (prev.eca_recurring || []).filter((_, i) => i !== idx)
   }));
+  // Confirm before deleting a whole ECA row (the X next to the ECA name wipes the entire activity)
+  const askRemoveEcaRow = (idx) => {
+    const eca = (kidForm.eca_recurring || [])[idx];
+    const label = (eca?.name || '').trim() || 'this ECA';
+    const dateCount = (eca?.dates || []).length;
+    const msg = `Delete ${label}?` +
+      (dateCount ? `\n\nThis removes the whole ECA and its ${dateCount} class date(s).` : '\n\nThis removes the whole ECA.') +
+      `\n\nIt only takes effect after you press Save Changes.`;
+    if (window.confirm(msg)) removeEcaRow(idx);
+  };
 
   // Calendar multi-select state for ECA dates (only one open at a time, toggles dates[] directly)
   const [skipCalIdx, setSkipCalIdx] = useState(null);
@@ -2598,7 +2608,7 @@ export default function App() {
                           onChange={(e) => updateEcaRow(idx, { ...eca, name: e.target.value })}
                           className="flex-1 bg-white px-3 py-2 rounded-lg font-bold outline-none border border-slate-100 text-sm"
                         />
-                        <button type="button" onClick={() => removeEcaRow(idx)} className="text-slate-300 hover:text-red-500 p-1">
+                        <button type="button" onClick={() => askRemoveEcaRow(idx)} className="text-slate-300 hover:text-red-500 p-1" title="Delete this ECA">
                           <X size={14} />
                         </button>
                       </div>
