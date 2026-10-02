@@ -1282,6 +1282,24 @@ export default function App() {
     ...prev,
     eca_recurring: (prev.eca_recurring || []).filter((_, i) => i !== idx)
   }));
+  // Returns an error string if end_time <= start_time (both set), else null.
+  const ecaTimeError = (eca) => {
+    const s = eca?.start_time, e = eca?.end_time;
+    if (!s || !e) return null;
+    if (e <= s) {
+      const nm = (eca?.name || '').trim() || 'This ECA';
+      return `${nm}: end time (${e}) must be later than start time (${s}).`;
+    }
+    return null;
+  };
+  // Live guard: block applying a start/end time that would make end <= start
+  const changeEcaTime = (idx, field, value) => {
+    const eca = (kidForm.eca_recurring || [])[idx] || {};
+    const next = { ...eca, [field]: value };
+    const err = ecaTimeError(next);
+    if (err) { window.alert(err + '\n\nPlease pick a valid time range.'); return; }
+    updateEcaRow(idx, next);
+  };
   // Confirm before deleting a whole ECA row (the X next to the ECA name wipes the entire activity)
   const askRemoveEcaRow = (idx) => {
     const eca = (kidForm.eca_recurring || [])[idx];
@@ -1432,6 +1450,12 @@ export default function App() {
   const handleSaveKid = () => {
     const name = kidForm.name.trim();
     if (!name) { showToast('Kid name is required', 'warn'); return; }
+    // Guard: no ECA may have end_time <= start_time
+    const badEca = (kidForm.eca_recurring || []).find(e => ecaTimeError(e));
+    if (badEca) {
+      window.alert(ecaTimeError(badEca) + '\n\nFix it before saving.');
+      return;
+    }
     const payload = buildKidPayload();
     // For edits, compute diff for summary toast; for new kids, save directly
     if (editingKidId) {
@@ -2628,11 +2652,11 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-2 mb-2">
                         <div>
                           <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Start time</label>
-                          <input type="time" value={eca.start_time || ''} onChange={(e) => updateEcaRow(idx, { ...eca, start_time: e.target.value })} className="w-full bg-white px-2 py-1.5 rounded-lg font-bold outline-none border border-slate-100 text-xs" />
+                          <input type="time" value={eca.start_time || ''} onChange={(e) => changeEcaTime(idx, 'start_time', e.target.value)} className="w-full bg-white px-2 py-1.5 rounded-lg font-bold outline-none border border-slate-100 text-xs" />
                         </div>
                         <div>
                           <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">End time</label>
-                          <input type="time" value={eca.end_time || ''} onChange={(e) => updateEcaRow(idx, { ...eca, end_time: e.target.value })} className="w-full bg-white px-2 py-1.5 rounded-lg font-bold outline-none border border-slate-100 text-xs" />
+                          <input type="time" value={eca.end_time || ''} onChange={(e) => changeEcaTime(idx, 'end_time', e.target.value)} className="w-full bg-white px-2 py-1.5 rounded-lg font-bold outline-none border border-slate-100 text-xs" />
                         </div>
                       </div>
 
