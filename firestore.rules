@@ -1,11 +1,112 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow read/write to any authenticated user (anonymous works).
-    // Future: restrict to specific family member emails:
-    //   && request.auth.token.email in ['nigel@gmail.com', 'wife@gmail.com']
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+    // === Helpers ===
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function hubClaim() { return request.auth.token.hub_key; }
+    function role() { return request.auth.token.role; }
+    function status() { return request.auth.token.status; }
+
+    function hasHubAccess(hubKey) {
+      return isSignedIn()
+        && hubClaim() == hubKey
+        && status() == 'active';
+    }
+    function isAdmin(hubKey) {
+      return hasHubAccess(hubKey) && role() == 'admin';
+    }
+    function isMember(hubKey) {
+      return hasHubAccess(hubKey) && role() in ['admin', 'member'];
+    }
+    function isChild(hubKey) {
+      return hasHubAccess(hubKey) && role() == 'child';
+    }
+    function boundKid(hubKey) {
+      return isChild(hubKey) ? request.auth.token.bound_kid_id : null;
+    }
+    function onlyFieldsChanged(fieldNames) {
+      return request.resource.data.diff(resource.data)
+        .affectedKeys().subsetOf(fieldNames);
+    }
+
+    // === Legacy admin bypass (Echo backend OAuth token + Nigel.mo过渡) ===
+    match /artifacts/{appId}/public/data/{document=**} {
+      allow read, write: if isSignedIn()
+        && request.auth.token.email in [
+          'echoopenc@gmail.com',
+          'nigel.mo@gmail.com'
+        ];
+    }
+
+    // === Members (admin writes, self-reads) ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/members/{uid} {
+      allow read: if hasHubAccess(hubKey)
+        && (isAdmin(hubKey) || request.auth.uid == uid);
+      allow write: if isAdmin(hubKey);
+      allow update: if hasHubAccess(hubKey)
+        && request.auth.uid == uid
+        && onlyFieldsChanged(['display_name', 'avatar', 'last_active_at']);
+    }
+
+    // === Invites ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/invites/{inviteId} {
+      allow read, write: if false;
+    }
+
+    // === Audit (admin reads, cloud fn writes) ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/audit/{eventId} {
+      allow read: if isAdmin(hubKey);
+      allow write: if false;
+    }
+
+    // === Kids + sub-collections ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/kids/{kidId} {
+      allow read: if hasHubAccess(hubKey)
+        || (isChild(hubKey) && kidId == boundKid(hubKey));
+      allow write: if isAdmin(hubKey);
+
+      match /ecas/{ecaId} {
+        allow read: if hasHubAccess(hubKey);
+        allow write: if isAdmin(hubKey);
+      }
+
+      match /reminders/{date} {
+        allow read: if hasHubAccess(hubKey);
+        allow write: if isAdmin(hubKey);
+      }
+
+      match /daily-notes/{date} {
+        allow read: if hasHubAccess(hubKey);
+        allow write: if hasHubAccess(hubKey) && isMember(hubKey);
+        allow write: if hasHubAccess(hubKey) && isChild(hubKey)
+                      && kidId == boundKid(hubKey)
+                      && onlyFieldsChanged(['reminder', 'updatedAt']);
+      }
+    }
+
+    // === Groceries ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/groceries/{doc=**} {
+      allow read: if hasHubAccess(hubKey);
+      allow write: if hasHubAccess(hubKey) && isMember(hubKey);
+    }
+
+    // === Meals (admin only writes) ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/meals/{doc=**} {
+      allow read: if hasHubAccess(hubKey);
+      allow write: if hasHubAccess(hubKey) && isAdmin(hubKey);
+    }
+
+    // === Pins (legacy) ===
+    match /artifacts/{appId}/public/data/pins/{pinId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // === Top-level users (self only) ===
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
   }
 }

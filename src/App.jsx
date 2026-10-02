@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, getDoc, getDocs, onSnapshot, addDoc, updateDoc, deleteDoc, writeBatch, query, orderBy, where, arrayRemove } from 'firebase/firestore';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, updatePassword, updateProfile, signOut } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, getDoc, getDocs, onSnapshot, addDoc, updateDoc, deleteDoc, writeBatch, query, orderBy, where, arrayRemove, deleteField } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
 
 import {
   Utensils, ShoppingCart, Plus, CheckCircle2, Circle, Trash2, RefreshCw,
   ChevronLeft, ChevronRight, Sparkles, X, Home, Fingerprint, ShieldCheck,
-  FileUp, PlusCircle, KeyRound, Zap, FolderPlus, ChevronRight as ChevronRightIcon,
+  FileUp, PlusCircle, KeyRound, Zap, FolderPlus, ChevronRight as ChevronRightIcon, Lock, Users2, Copy, UserPlus,
   Tag, LayoutGrid, Info, StickyNote, Send, Download, BookOpen,
   Sun, Users, Baby, School, Shirt, Bus, CalendarDays, GraduationCap, Pencil,
   Backpack, Bell, PencilLine
@@ -36,8 +37,28 @@ const KID_COLORS = [
 
 const KID_GRADES = ['K1','K2','K3','P1','P2','P3','P4','P5','P6','F1','F2','F3','F4','F5','F6'];
 
+// Self-clear needs_password_setup after successful password login.
+// User proved they have a password by signing in successfully.
+async function clearPasswordSetupFlag(db, appId, hubKey, uid) {
+  try {
+    const memberRef = doc(db, 'artifacts', appId, 'public', 'data', 'hubs', hubKey, 'members', uid);
+    const snap = await getDoc(memberRef);
+    if (snap.exists() && snap.data().needs_password_setup) {
+      await updateDoc(memberRef, {
+        needs_password_setup: false,
+        has_password: true,
+        last_password_change_at: new Date().toISOString(),
+      });
+    }
+  } catch (e) {
+    console.warn('clearPasswordSetupFlag failed (non-fatal):', e);
+  }
+}
+
 const WEEKDAY_KEYS = ['mon','tue','wed','thu','fri','sat','sun'];
 const WEEKDAY_LABELS = { mon:'Mon', tue:'Tue', wed:'Wed', thu:'Thu', fri:'Fri', sat:'Sat', sun:'Sun' };
+const SUN_HEADER_CLS = 'text-red-500';
+const SUN_DAY_NUM_CLS = 'text-red-500';
 const UNIFORM_OPTIONS = ['Uniform', 'Sportswear', 'Casual'];
 
 // Translate Chinese dress-code labels to English (display-layer only)
@@ -69,7 +90,7 @@ const blankKid = {
 
 // Compute recurring ECAs that fall on a given date for a kid
 // Returns array of ECA objects (with computed time window) that match.
-const WEEKDAY_KEYS_FULL = ['mon','tue','wed','thu','fri','sat','sun'];
+const WEEKDAY_KEYS_FULL = ['sun','mon','tue','wed','thu','fri','sat'];
 // Ping pong (table tennis) — 🏓 emoji
 const ECAIcon = ({ size = 14, className = '' }) => (
   <span className={className} style={{ fontSize: size, lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>🏓</span>
@@ -81,11 +102,16 @@ const getECAsForDate = (kid, dateInput) => {
     ? dateInput.slice(0, 10)
     : (dateInput instanceof Date ? dateInput.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10));
   // New schema (v2): explicit dates array — just lookup
-  return list.filter(eca => {
+  const matched = list.filter(eca => {
     if (!eca?.name) return false;
     const dates = eca.dates || [];
     return dates.map(d => String(d).slice(0, 10)).includes(todayStr);
   });
+  // Sort by start_time ascending; ECAs without start_time go to the end (preserve relative order)
+  const withTime = matched.filter(e => e.start_time);
+  const withoutTime = matched.filter(e => !e.start_time);
+  withTime.sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
+  return [...withTime, ...withoutTime];
 };
 
 const formatECAList = (ecas) => {
@@ -181,12 +207,13 @@ const DatePickerSection = ({ field, title, hint, IconComp, kidForm, setKidForm, 
   // Build calendar cells for current view
   const firstOfMonth = new Date(view.y, view.m, 1);
   const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
-  const firstDow = (firstOfMonth.getDay() + 6) % 7;
+  const firstDow = firstOfMonth.getDay(); // 0 = Sun (leftmost)
   const cells = [];
   for (let i = 0; i < firstDow; i++) cells.push(null);
   for (let dom = 1; dom <= daysInMonth; dom++) {
     const d = new Date(view.y, view.m, dom);
-    cells.push({ ds: ymd(view.y, view.m, dom), dom, d });
+    const dowKey = WEEKDAY_KEYS_FULL[d.getDay()];
+    cells.push({ ds: ymd(view.y, view.m, dom), dom, d, dowKey });
   }
   const monthLabel = new Date(view.y, view.m, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   return (
@@ -228,7 +255,7 @@ const DatePickerSection = ({ field, title, hint, IconComp, kidForm, setKidForm, 
           </div>
           <div className="grid grid-cols-7 gap-1 text-center mb-1">
             {WEEKDAY_KEYS_FULL.map(k => (
-              <div key={k} className="text-[9px] font-bold text-slate-400 uppercase">{WEEKDAY_LABELS[k]}</div>
+              <div key={k} className={`text-[9px] font-bold uppercase ${k === 'sun' ? SUN_HEADER_CLS : 'text-slate-400'}`}>{WEEKDAY_LABELS[k]}</div>
             ))}
           </div>
           <div className="grid grid-cols-7 gap-1">
@@ -236,11 +263,14 @@ const DatePickerSection = ({ field, title, hint, IconComp, kidForm, setKidForm, 
               if (!c) return <div key={'b' + i} />;
               const already = dates.includes(c.ds);
               const inDraft = draft.has(c.ds);
+              const isSun = c.dowKey === 'sun';
               const cls = already
                 ? 'bg-amber-100 text-amber-400 line-through'
                 : inDraft
                   ? 'bg-indigo-600 text-white'
-                  : 'bg-slate-50 text-slate-700 hover:bg-slate-200';
+                  : isSun
+                    ? 'bg-slate-50 text-red-500 hover:bg-slate-200'
+                    : 'bg-slate-50 text-slate-700 hover:bg-slate-200';
               return (
                 <button
                   key={c.ds}
@@ -453,25 +483,370 @@ const getTodayVerse = () => {
   return BIBLE_VERSES[idx];
 };
 
+// ============================================================
+// LoginScreen — email/password + Google sign-in
+// ============================================================
+function LoginScreen({ onEmailLogin, onGoogleLogin, onForgotPassword, error, loading }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+
+  const submitEmail = async (e) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    await onEmailLogin(email, password);
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50 flex items-center justify-center p-4 font-sans">
+      <div className="bg-white rounded-[2rem] shadow-2xl max-w-md w-full p-8 border border-amber-100">
+        <div className="text-center mb-8">
+          <img src="/icon-192.png" alt="Family Hub X" className="w-24 h-24 mx-auto mb-4 rounded-2xl shadow-md" />
+          <h1 className="text-3xl font-bold text-slate-800">Family Hub X</h1>
+          <p className="text-xs text-slate-500 mt-1 uppercase tracking-widest">家庭共享日曆</p>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 text-red-700 p-3 rounded-xl mb-4 text-sm border border-red-100">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={submitEmail} className="space-y-3">
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            disabled={loading}
+            className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50"
+            required
+            autoComplete="email"
+          />
+          <div className="relative">
+            <input
+              type={showPwd ? 'text' : 'password'}
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={loading}
+              className="w-full px-4 py-3 pr-12 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50"
+              required
+              autoComplete="current-password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPwd(!showPwd)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs font-bold"
+            >
+              {showPwd ? 'HIDE' : 'SHOW'}
+            </button>
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-amber-500 text-white py-3 rounded-xl font-bold hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50 transition-all shadow-md"
+          >
+            {loading ? '登入中…' : '登入'}
+          </button>
+        </form>
+
+        <div className="my-4 flex items-center gap-3">
+          <div className="flex-1 h-px bg-slate-200" />
+          <span className="text-xs text-slate-400 font-bold">或</span>
+          <div className="flex-1 h-px bg-slate-200" />
+        </div>
+
+        <button
+          onClick={onGoogleLogin}
+          disabled={loading}
+          className="w-full border border-slate-200 py-3 rounded-xl font-bold text-slate-700 hover:bg-slate-50 active:scale-[0.98] disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+          用 Google 帳戶登入
+        </button>
+
+        <div className="text-center mt-6 space-y-2">
+          <button
+            onClick={() => {
+              if (!email) {
+                onForgotPassword('', '先輸入 email');
+                return;
+              }
+              onForgotPassword(email);
+            }}
+            className="text-amber-600 hover:underline text-sm font-bold"
+          >
+            忘記密碼？
+          </button>
+          <p className="text-[10px] text-slate-400">
+            Family Hub X · v{APP_VERSION}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// InviteAdultModal — call Cloud Function inviteMember
+// ============================================================
+function InviteAdultModal({ hubKey, functions, onClose, onResult }) {
+  const [email, setEmail] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [role, setRole] = useState('member');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const valid = email && email.includes('@') && displayName;
+
+  const submit = async () => {
+    setBusy(true); setError(null);
+    try {
+      const fn = httpsCallable(functions, 'inviteMember');
+      const res = await fn({ email, display_name: displayName, role });
+      onResult(res.data);
+      onClose();
+    } catch (e) {
+      console.error('inviteMember failed:', e);
+      setError(e.message || 'Invite failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden">
+        <div className="p-6 border-b flex justify-between items-center bg-gradient-to-r from-indigo-50 to-blue-50">
+          <div className="flex items-center gap-2">
+            <UserPlus size={18} className="text-indigo-600" />
+            <h2 className="text-sm font-bold text-slate-900 uppercase">Invite Adult</h2>
+          </div>
+          <button onClick={onClose} disabled={busy} className="p-2 text-slate-300 bg-white rounded-xl disabled:opacity-30"><X size={18} /></button>
+        </div>
+        <div className="p-6 space-y-3">
+          <p className="text-xs text-slate-500">Creates a Firebase Auth user + member doc. We'll email them a setup link automatically.</p>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} autoFocus disabled={busy}
+              placeholder="person@example.com"
+              className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50" />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Display name</label>
+            <input type="text" value={displayName} onChange={e => setDisplayName(e.target.value)} disabled={busy}
+              placeholder="e.g. Hattie"
+              className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50" />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Role</label>
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              {['admin', 'member'].map(r => (
+                <button key={r} onClick={() => setRole(r)} disabled={busy}
+                  className={`py-3 rounded-xl text-xs font-bold uppercase border-2 transition-all disabled:opacity-50 ${
+                    role === r ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200'
+                  }`}>
+                  {r}
+                </button>
+              ))}
+            </div>
+          </div>
+          {error && (
+            <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-xl p-3">{error}</p>
+          )}
+          <div className="flex gap-2 pt-2">
+            <button onClick={onClose} disabled={busy}
+              className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold uppercase disabled:opacity-50">
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={!valid || busy}
+              className="flex-1 py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase active:scale-95 disabled:opacity-40 shadow-md flex items-center justify-center gap-2"
+            >
+              {busy ? <><RefreshCw size={14} className="animate-spin" /> Sending...</> : 'Send Invite'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// InviteChildModal — call Cloud Function inviteChild
+// ============================================================
+function InviteChildModal({ hubKey, kids, functions, onClose, onResult }) {
+  const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [kidId, setKidId] = useState(kids[0]?.id || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const usernameValid = /^[a-z0-9_]{3,20}$/.test(username);
+  const valid = usernameValid && displayName && kidId;
+
+  const submit = async () => {
+    setBusy(true); setError(null);
+    try {
+      const fn = httpsCallable(functions, 'inviteChild');
+      const res = await fn({ username, display_name: displayName, bound_kid_id: kidId });
+      onResult(res.data);
+      onClose();
+    } catch (e) {
+      console.error('inviteChild failed:', e);
+      setError(e.message || 'Invite failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden">
+        <div className="p-6 border-b flex justify-between items-center bg-gradient-to-r from-amber-50 to-orange-50">
+          <div className="flex items-center gap-2">
+            <UserPlus size={18} className="text-amber-600" />
+            <h2 className="text-sm font-bold text-slate-900 uppercase">Invite Child</h2>
+          </div>
+          <button onClick={onClose} disabled={busy} className="p-2 text-slate-300 bg-white rounded-xl disabled:opacity-30"><X size={18} /></button>
+        </div>
+        <div className="p-6 space-y-3">
+          <p className="text-xs text-slate-500">Username becomes synthetic email <code className="bg-slate-100 px-1 rounded">@kids.fhx.app</code>. Bound to a kid record so child can only edit their own schedule.</p>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Username (3-20 chars, lowercase)</label>
+            <input type="text" value={username} onChange={e => setUsername(e.target.value.toLowerCase())} autoFocus disabled={busy}
+              placeholder="eugene"
+              className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
+            {username && !usernameValid && (
+              <p className="text-[10px] text-red-500 mt-1">3-20 chars, lowercase letters/digits/underscore only</p>
+            )}
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Display name</label>
+            <input type="text" value={displayName} onChange={e => setDisplayName(e.target.value)} disabled={busy}
+              placeholder="e.g. Eugene"
+              className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Bind to kid</label>
+            <select value={kidId} onChange={e => setKidId(e.target.value)} disabled={busy}
+              className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50">
+              {kids.map(k => (
+                <option key={k.id} value={k.id}>{k.name} · {k.grade || '?'}{k.className ? `/${k.className}` : ''}</option>
+              ))}
+            </select>
+          </div>
+          {error && (
+            <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-xl p-3">{error}</p>
+          )}
+          <div className="flex gap-2 pt-2">
+            <button onClick={onClose} disabled={busy}
+              className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold uppercase disabled:opacity-50">
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={!valid || busy}
+              className="flex-1 py-3 bg-amber-500 text-white rounded-xl text-xs font-bold uppercase active:scale-95 disabled:opacity-40 shadow-md flex items-center justify-center gap-2"
+            >
+              {busy ? <><RefreshCw size={14} className="animate-spin" /> Sending...</> : 'Send Invite'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// InviteResultModal — show setup link after invite sent
+// ============================================================
+function InviteResultModal({ result, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const emailOk = result.email_sent;
+  const isChild = result.display_name && result.email && result.email.endsWith('@kids.fhx.app');
+  const shareUrl = result.setup_link;
+  const subject = isChild
+    ? `Welcome to Family Hub X — set up ${result.display_name}'s account`
+    : `Welcome to Family Hub X — set up your account`;
+  const body = isChild
+    ? `Hi,\n\n${result.display_name} has been invited to our Family Hub.\n\nClick here to set a password and get started:\n${shareUrl}\n\nThis link expires in 1 hour.\n\n— Family Hub X`
+    : `Hi,\n\nYou've been invited to join our Family Hub on Family Hub X.\n\nClick here to set a password and get started:\n${shareUrl}\n\nThis link expires in 1 hour.\n\n— Family Hub X`;
+  const mailto = `mailto:${result.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden">
+        <div className={`p-6 border-b flex justify-between items-center ${emailOk ? 'bg-gradient-to-r from-emerald-50 to-green-50' : 'bg-gradient-to-r from-amber-50 to-orange-50'}`}>
+          <div className="flex items-center gap-2">
+            {emailOk ? <CheckCircle2 size={18} className="text-emerald-600" /> : <Info size={18} className="text-amber-600" />}
+            <h2 className="text-sm font-bold text-slate-900 uppercase">
+              {emailOk ? 'Invite Sent' : 'Email Failed — Share Manually'}
+            </h2>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-300 bg-white rounded-xl"><X size={18} /></button>
+        </div>
+        <div className="p-6 space-y-3">
+          <div className="text-xs text-slate-600 space-y-1">
+            <p><strong>{result.display_name}</strong> ({result.email})</p>
+            <p>Role: <strong>{result.role || 'child'}</strong> · {result.created ? 'New account created' : 'Existing user updated'}</p>
+            {emailOk ? (
+              <p className="text-emerald-700">✓ Email sent to {result.email}</p>
+            ) : (
+              <p className="text-amber-700">⚠ Email send failed: {result.email_error || 'SMTP not configured'}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Setup link (1-hour expiry)</label>
+            <div className="bg-slate-900 text-green-400 p-3 rounded-xl font-mono text-[10px] break-all leading-relaxed mt-1 max-h-32 overflow-y-auto">
+              {shareUrl}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => { navigator.clipboard.writeText(shareUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+              className="py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold uppercase active:scale-95 flex items-center justify-center gap-2"
+            >
+              <Copy size={14} /> {copied ? 'Copied!' : 'Copy link'}
+            </button>
+            <a href={mailto}
+              className="py-3 bg-emerald-600 text-white rounded-xl text-xs font-bold uppercase active:scale-95 flex items-center justify-center gap-2 no-underline">
+              <Send size={14} /> Email via…
+            </a>
+          </div>
+
+          <p className="text-[10px] text-slate-400 leading-relaxed">
+            {emailOk
+              ? 'Email already sent. You can also copy and share the link manually (WhatsApp, SMS) if they don\'t see the email.'
+              : 'SMTP not configured or failed. Send the setup link via WhatsApp / SMS / your own email client.'}
+          </p>
+          <button onClick={onClose}
+            className="w-full py-2 text-slate-400 text-[10px] font-bold uppercase">Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [isConfigReady, setIsConfigReady] = useState(false);
   const [user, setUser] = useState(null);
   const [loginError, setLoginError] = useState(null);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [appId] = useState('family-hub-v2');
 
-  const [activeProfile, setActiveProfile] = useState(() => {
-    const saved = localStorage.getItem('family_app_profile');
-    try { return saved ? JSON.parse(saved) : null; } catch { return null; }
-  });
-
-  const [inputPhone, setInputPhone] = useState(() => localStorage.getItem('family_app_phone') || '');
-  const [inputProfileName, setInputProfileName] = useState(() => {
-    const saved = localStorage.getItem('family_app_profile');
-    try { return saved ? JSON.parse(saved).name : ''; } catch { return ''; }
-  });
-
-  const [quickCode, setQuickCode] = useState('');
-  const [isQuickLoginMode, setIsQuickLoginMode] = useState(true);
+  // Active profile is derived from Firebase Auth user's custom claims
+  // (hub_key + role + display_name from members doc).
+  const [activeProfile, setActiveProfile] = useState(null);
 
   const [activeTab, setActiveTab] = useState('schedule');
   const [meals, setMeals] = useState([]);
@@ -492,23 +867,41 @@ export default function App() {
 
   const [editingRemark, setEditingRemark] = useState(null);
   const [manualInputs, setManualInputs] = useState({});
-  const [newPin, setNewPin] = useState('');
   const [newGrocery, setNewGrocery] = useState('');
   const [editingCategory, setEditingCategory] = useState(null);
   const [editingCategoryName, setEditingCategoryName] = useState('');
 
+
   // Settings page state
-  const [existingPins, setExistingPins] = useState([]);
   const [editingProfileName, setEditingProfileName] = useState(false);
   const [profileNameDraft, setProfileNameDraft] = useState('');
-  const [pinError, setPinError] = useState(null);
   const [confirmLogout, setConfirmLogout] = useState(false);
+  const [hubProfile, setHubProfile] = useState(null);  // { name, createdAt, ... }
+  const [editingHubName, setEditingHubName] = useState(false);
+  const [hubNameDraft, setHubNameDraft] = useState('');
+  // Change password modal
+  const [changePwdOpen, setChangePwdOpen] = useState(false);
+  const [currentPwd, setCurrentPwd] = useState('');
+  const [newPwd, setNewPwd] = useState('');
+  const [confirmPwd, setConfirmPwd] = useState('');
+  const [changePwdError, setChangePwdError] = useState(null);
+  const [changePwdLoading, setChangePwdLoading] = useState(false);
+  // Members UI state (admin only)
+  const [members, setMembers] = useState([]);
+  const [membersKids, setMembersKids] = useState([]);
+  const [inviteAdultOpen, setInviteAdultOpen] = useState(false);
+  const [inviteChildOpen, setInviteChildOpen] = useState(false);
+  const [inviteResult, setInviteResult] = useState(null);  // { setup_link, email_sent, email_error, ... }
 
   // ===== School module state =====
   const [kids, setKids] = useState([]);
   const [kidForm, setKidForm] = useState(blankKid);
   const [showKidForm, setShowKidForm] = useState(false);
   const [editingKidId, setEditingKidId] = useState(null);
+  // Snapshot of bulk reminders when kid form opens — used to detect changes made during this edit session.
+  // Bulk reminders save directly to Firestore (per-date docs) on modal Save, not via the kid form's Save button.
+  // So computeKidDiff would otherwise report "no changes" even when reminders were added.
+  const originalBulkRemindersRef = useRef(null);
 
   // Daily notes (ECA / Test / To-bring / Reminder) — per kid per date
   const [dailyNotes, setDailyNotes] = useState({}); // { [kidId]: { eca, test, to_bring, reminder } }
@@ -533,7 +926,7 @@ export default function App() {
   const firebaseRefs = useMemo(() => {
     try {
       const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-      return { auth: getAuth(app), db: getFirestore(app) };
+      return { auth: getAuth(app), db: getFirestore(app), functions: getFunctions(app, 'us-central1') };
     } catch (e) {
       console.error('Firebase init error:', e);
       return null;
@@ -542,23 +935,67 @@ export default function App() {
 
   useEffect(() => {
     if (!firebaseRefs) return;
-    const { auth } = firebaseRefs;
-    
-    const initAuth = async () => {
-      try {
-        await signInAnonymously(auth);
-      } catch (e) {
-        console.error('Auth error:', e);
-        setLoginError('Sign-in failed. Please refresh the page.');
-        setIsConfigReady(true); // Exit spinner so user sees the error
-      }
-    };
+    const { auth, db } = firebaseRefs;
 
-    initAuth();
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsConfigReady(true);
+    // Watch auth state. If signed in, fetch fresh custom claims to derive
+    // activeProfile (hub_key + role). If no user, show LoginScreen.
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      if (!u) {
+        setUser(null);
+        setActiveProfile(null);
+        setIsConfigReady(true);
+        return;
+      }
+      // Phase 5: no anonymous users. Force sign-out if cached.
+      if (u.isAnonymous) {
+        try { await signOut(auth); } catch {}
+        return;
+      }
+      try {
+        // Force token refresh so latest custom claims are present.
+        const tokenResult = await u.getIdTokenResult(true);
+        const claims = tokenResult.claims || {};
+        if (claims.hub_key && claims.role === 'admin' && claims.status === 'active') {
+          setUser(u);
+          setActiveProfile({
+            uid: u.uid,
+            email: u.email,
+            hubKey: claims.hub_key,
+            role: claims.role,
+            name: u.displayName || claims.hub_key,
+          });
+          setLoginError(null);
+          // Self-clear needs_password_setup after successful password login
+          clearPasswordSetupFlag(db, appId, claims.hub_key, u.uid);
+        } else if (claims.hub_key && (claims.role === 'member' || claims.role === 'child') && claims.status === 'active') {
+          // Future Phase 3/4: member + child support
+          setUser(u);
+          setActiveProfile({
+            uid: u.uid,
+            email: u.email,
+            hubKey: claims.hub_key,
+            role: claims.role,
+            name: u.displayName || claims.hub_key,
+            boundKidId: claims.bound_kid_id,
+          });
+          setLoginError(null);
+          clearPasswordSetupFlag(db, appId, claims.hub_key, u.uid);
+        } else {
+          console.warn('User signed in but missing/insufficient claims:', claims);
+          setUser(u);
+          setActiveProfile(null);
+          setLoginError(`Account not linked to a hub. Please contact admin. (claims: ${JSON.stringify(Object.keys(claims))})`);
+        }
+      } catch (e) {
+        console.error('Token refresh failed:', e);
+        setLoginError('Authentication error: ' + (e.message || 'unknown'));
+        setUser(null);
+        setActiveProfile(null);
+      } finally {
+        setIsConfigReady(true);
+      }
     });
+    return unsub;
   }, [firebaseRefs]);
 
   useEffect(() => {
@@ -567,6 +1004,8 @@ export default function App() {
     const root = ['artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey];
 
     const subs = [
+      // Hub profile (name + settings)
+      onSnapshot(doc(db, ...root), (s) => setHubProfile(s.exists() ? s.data() : null)),
       onSnapshot(collection(db, ...root, 'meals'), (s) => setMeals(s.docs.map(d => ({ id: d.id, ...d.data() })))),
       onSnapshot(collection(db, ...root, 'groceries'), (s) => setGroceries(s.docs.map(d => ({ id: d.id, ...d.data() })))),
       onSnapshot(collection(db, ...root, 'dishes'), (s) => setDishes(s.docs.map(d => ({ id: d.id, ...d.data() })))),
@@ -576,7 +1015,9 @@ export default function App() {
       onSnapshot(
         query(collection(db, 'artifacts', appId, 'public', 'data', 'pins'), where('hubKey', '==', activeProfile.hubKey)),
         (s) => setExistingPins(s.docs.map(d => ({ pin: d.id, ...d.data() })))
-      )
+      ),
+      // Members (admin reads all members)
+      onSnapshot(collection(db, ...root, 'members'), (s) => setMembers(s.docs.map(d => ({ uid: d.id, ...d.data() }))))
     ];
 
     return () => subs.forEach(unsub => unsub());
@@ -595,6 +1036,28 @@ export default function App() {
     });
     return () => subs.forEach(unsub => unsub());
   }, [user, activeProfile, firebaseRefs, appId, kids, selectedDate]);
+
+  // Bulk reminders per kid (sub-collection reminders/{YYYY-MM-DD} → auto reminder source)
+  const [bulkReminders, setBulkReminders] = useState({}); // { kidId: { 'YYYY-MM-DD': 'text' } }
+  useEffect(() => {
+    if (!user || !activeProfile || !firebaseRefs || kids.length === 0) return;
+    const { db } = firebaseRefs;
+    const basePath = ['artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids'];
+    const subs = kids.map(kid => {
+      const ref = collection(db, ...basePath, kid.id, 'reminders');
+      return onSnapshot(ref, (snap) => {
+        const map = {};
+        snap.docs.forEach(d => { const dt = d.data(); if (dt?.text) map[d.id] = dt.text; });
+        setBulkReminders(prev => ({ ...prev, [kid.id]: map }));
+      });
+    });
+    return () => subs.forEach(unsub => unsub());
+  }, [user, activeProfile, firebaseRefs, appId, kids]);
+
+  const getAutoReminderText = (kidId, dateStr) => {
+    const m = bulkReminders[kidId];
+    return (m && m[dateStr]) ? m[dateStr] : null;
+  };
 
   // Daily Note reads directly from Firestore state (used as initial value for uncontrolled textarea)
   const dailyNoteFromDB = (meals || []).find(m => m.id === `${selectedDate}_planner`)?.note || '';
@@ -629,81 +1092,133 @@ export default function App() {
       setEditingProfileName(false);
       return;
     }
-    const oldProfile = activeProfile;
-    const oldKey = oldProfile.hubKey;
-    const newKey = `${oldProfile.phone}_${newName.toLowerCase()}`;
+    if (newName.length > 30) {
+      showToast('Name too long (max 30)', 'warn');
+      return;
+    }
     try {
-      // Move all hub data to the new hubKey
-      const oldRoot = ['artifacts', appId, 'public', 'data', 'hubs', oldKey];
-      const newRoot = ['artifacts', appId, 'public', 'data', 'hubs', newKey];
-      const batch = writeBatch(firebaseRefs.db);
-      const cols = ['meals', 'groceries', 'dishes', 'categories'];
-      for (const c of cols) {
-        const snap = await getDocs(collection(firebaseRefs.db, ...oldRoot, c));
-        snap.docs.forEach(d => {
-          const ref = doc(firebaseRefs.db, ...newRoot, c, d.id);
-          batch.set(ref, d.data());
-          batch.delete(doc(firebaseRefs.db, ...oldRoot, c, d.id));
-        });
-      }
-      // Update PINs to point to new hubKey
-      const pinsSnap = await getDocs(query(collection(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'pins'), where('hubKey', '==', oldKey)));
-      pinsSnap.docs.forEach(d => {
-        batch.update(doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'pins', d.id), { hubKey: newKey, name: newName });
-      });
-      await batch.commit();
-      // Update local profile
-      const newProfile = { ...oldProfile, name: newName, hubKey: newKey };
-      localStorage.setItem('family_app_profile', JSON.stringify(newProfile));
-      setActiveProfile(newProfile);
+      // 1) Update Firebase Auth displayName
+      await updateProfile(firebaseRefs.auth.currentUser, { displayName: newName });
+      // 2) Update member doc display_name for consistency
+      const memberRef = doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'members', activeProfile.uid);
+      await updateDoc(memberRef, { display_name: newName });
+      // 3) Update local state
+      setActiveProfile({ ...activeProfile, name: newName });
       setEditingProfileName(false);
       setProfileNameDraft('');
+      showToast('Display name updated', 'success');
     } catch (e) {
-      console.error('Rename failed:', e);
-      alert('Rename failed. Try again.');
+      console.error('Display name update failed:', e);
+      showToast('Failed: ' + (e.message || 'unknown'), 'error');
     }
   };
 
-  const handleSetNewPin = async () => {
-    setPinError(null);
-    if (newPin.length < 4) { setPinError('PIN must be at least 4 digits'); showToast('PIN too short', 'warn'); return; }
-    // Check if PIN is already taken
+  const handleSaveHubName = async () => {
+    const newName = hubNameDraft.trim();
+    if (!newName || newName === hubProfile?.profile?.name) {
+      setEditingHubName(false);
+      return;
+    }
+    if (newName.length > 30) {
+      showToast('Hub name too long (max 30)', 'warn');
+      return;
+    }
     try {
-      const snap = await getDoc(doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'pins', newPin));
-      if (snap.exists()) {
-        const existing = snap.data();
-        if (existing.hubKey === activeProfile.hubKey) {
-          if (!window.confirm('This PIN already exists for your hub. Overwrite?')) return;
-        } else {
-          setPinError('This PIN is used by another hub. Choose a different one.');
-          return;
-        }
-      }
-      await setDoc(doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'pins', newPin), {
-        hubKey: activeProfile.hubKey, name: activeProfile.name, phone: activeProfile.phone, createdAt: Date.now()
+      const ref = doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey);
+      await updateDoc(ref, {
+        'profile.name': newName,
+        'profile.updated_at': new Date().toISOString(),
       });
-      setNewPin('');
+      setEditingHubName(false);
+      setHubNameDraft('');
+      showToast('Hub name updated', 'success');
     } catch (e) {
-      setPinError('Failed to set PIN. Try again.');
-    }
-  };
-
-  const handleDeletePin = async (pin) => {
-    if (!window.confirm(`Delete PIN ${pin}?`)) return;
-    try {
-      await deleteDoc(doc(firebaseRefs.db, 'artifacts', appId, 'public', 'data', 'pins', pin));
-    } catch (e) {
-      alert('Delete failed. Try again.');
+      console.error('Hub name update failed:', e);
+      showToast('Failed: ' + (e.message || 'unknown'), 'error');
     }
   };
 
   const handleLogout = async () => {
     try {
-      await firebaseRefs.auth.signOut();
-    } catch (e) { /* ignore */ }
-    localStorage.removeItem('family_app_profile');
-    setActiveProfile(null);
+      await signOut(firebaseRefs.auth);
+    } catch (e) { console.error('Sign out error:', e); }
+    // onAuthStateChanged will fire and reset user + activeProfile
     setConfirmLogout(false);
+  };
+
+  // ===== Login handlers (Phase 5) =====
+  const handleEmailLogin = async (email, password) => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      await signInWithEmailAndPassword(firebaseRefs.auth, email, password);
+      // onAuthStateChanged will fetch claims and enter app
+    } catch (e) {
+      const code = e?.code || '';
+      const msg = code === 'auth/invalid-credential' ? 'Email 或密碼不正確' :
+                  code === 'auth/user-disabled' ? '此帳戶已被停用' :
+                  code === 'auth/too-many-requests' ? '嘗試太多次，稍後再試' :
+                  (e?.message || '登入失敗');
+      setLoginError(msg);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(firebaseRefs.auth, provider);
+    } catch (e) {
+      const code = e?.code || '';
+      if (code === 'auth/popup-closed-by-user') {
+        // User cancelled — silent
+      } else if (code === 'auth/account-exists-with-different-credential') {
+        setLoginError('此 email 已用其他方法註冊');
+      } else {
+        setLoginError('Google 登入失敗：' + (e?.message || 'unknown'));
+      }
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async (email) => {
+    if (!email) {
+      setLoginError('先輸入 email 再 reset');
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(firebaseRefs.auth, email);
+      setLoginError(null);
+      alert('Reset link 已寄到 ' + email + '，請檢查 inbox');
+    } catch (e) {
+      setLoginError('Reset 失敗：' + (e?.message || 'unknown'));
+    }
+  };
+
+  const handleChangePassword = async (currentPwd, newPwd) => {
+    if (!user || !user.email) return { ok: false, error: 'Not signed in' };
+    if (newPwd.length < 8) return { ok: false, error: '密碼至少 8 個字元' };
+    try {
+      // Re-authenticate first (Firebase requires recent login for password change)
+      const { EmailAuthProvider, reauthenticateWithCredential } = await import('firebase/auth');
+      const credential = EmailAuthProvider.credential(user.email, currentPwd);
+      await reauthenticateWithCredential(user, credential);
+      await updatePassword(user, newPwd);
+      return { ok: true };
+    } catch (e) {
+      const code = e?.code || '';
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        return { ok: false, error: '現有密碼不正確' };
+      }
+      if (code === 'auth/requires-recent-login') {
+        return { ok: false, error: '請先 logout 再 login，然後立即改密碼' };
+      }
+      return { ok: false, error: e?.message || '改密碼失敗' };
+    }
   };
 
   // ─── Kids (school module) ──────────────────────────────────────────────────
@@ -740,10 +1255,12 @@ export default function App() {
         student_no: kid.student_no || '',
       });
       setEditingKidId(kid.id);
+      originalBulkRemindersRef.current = { ...(bulkReminders[kid.id] || {}) };
     } else {
       setKidForm({ ...blankKid, uniform_schedule: blankUniformSchedule(), school_holidays: [], eca_recurring: [] });
       setEditingKidId(null);
     }
+    originalBulkRemindersRef.current = null;
     setExpandedEcaDates(new Set());  // reset expand state — ECA indices are per-form
     setShowKidForm(true);
   };
@@ -771,8 +1288,21 @@ export default function App() {
   const [skipCalView, setSkipCalView] = useState({ y: new Date().getFullYear(), m: new Date().getMonth() });
   const [skipCalRange, setSkipCalRange] = useState({ from: '', to: '', weekday: '' });
 
+  // ── Bulk Reminder modal (separate state from ECA calendar picker) ──
+  const [bulkReminderModal, setBulkReminderModal] = useState(null); // { kidId, mode: 'new'|'edit', date?: string, dates: Set<string>, text: string }
+  const [bulkReminderCalView, setBulkReminderCalView] = useState({ y: new Date().getFullYear(), m: new Date().getMonth() });
+  const [bulkReminderCalRange, setBulkReminderCalRange] = useState({ from: '', to: '' });
+
   // ECA dates list — per-ECA expand/shrink state (collapsed by default; first 12 chips shown)
   const [expandedEcaDates, setExpandedEcaDates] = useState(new Set());
+  const [expandedBulkReminderGroups, setExpandedBulkReminderGroups] = useState(new Set());
+  const toggleBulkReminderExpand = (text) => {
+    setExpandedBulkReminderGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(text)) next.delete(text); else next.add(text);
+      return next;
+    });
+  };
   const toggleEcaExpand = (idx) => setExpandedEcaDates(prev => {
     const next = new Set(prev);
     if (next.has(idx)) next.delete(idx); else next.add(idx);
@@ -896,8 +1426,23 @@ export default function App() {
     if (editingKidId) {
       const originalKid = kids.find(k => k.id === editingKidId);
       const diff = computeKidDiff(originalKid, payload);
-      if (diff.length === 0) {
+      // Detect bulk reminder changes during this edit session (they're saved directly to Firestore on modal save)
+      const origBulk = originalBulkRemindersRef.current || {};
+      const currBulk = bulkReminders[editingKidId] || {};
+      const bulkChanged = JSON.stringify({ k: Object.keys(origBulk).sort(), v: Object.keys(origBulk).sort().map(d => origBulk[d]) }) !==
+                          JSON.stringify({ k: Object.keys(currBulk).sort(), v: Object.keys(currBulk).sort().map(d => currBulk[d]) });
+      if (diff.length === 0 && !bulkChanged) {
         showToast('No changes — keep editing', 'info');
+        return;
+      }
+      if (diff.length === 0 && bulkChanged) {
+        // Only bulk reminders changed — they're already saved to Firestore. Just close the form.
+        showToast('Reminders saved', 'success');
+        setShowKidForm(false);
+        setConfirmKidSave(null);
+        setKidForm(blankKid);
+        setEditingKidId(null);
+        originalBulkRemindersRef.current = null;
         return;
       }
       setConfirmKidSave({ payload, diff });
@@ -923,6 +1468,139 @@ export default function App() {
     } catch (e) {
       console.error('Save kid failed:', e);
       showToast('Save failed', 'error');
+    }
+  };
+
+  // ── Bulk Reminder CRUD (separate from kid doc — own subcollection kids/{kidId}/reminders/{date}) ──
+  const openBulkReminderModal = (existing /* { text } | null — when text is set, edit the whole group */) => {
+    if (!editingKidId) {
+      showToast('Save kid first before adding reminders', 'warn');
+      return;
+    }
+    if (existing && existing.text !== undefined) {
+      // Edit mode (group): load all dates with this text
+      const datesArr = Object.entries(bulkReminders[editingKidId] || {})
+        .filter(([_, t]) => t === existing.text)
+        .map(([d]) => d)
+        .sort();
+      const datesSet = new Set(datesArr);
+      setBulkReminderModal({
+        kidId: editingKidId,
+        mode: 'edit',
+        dates: datesSet,
+        text: existing.text,
+        originalText: existing.text,
+        originalDates: new Set(datesSet),
+      });
+      if (datesArr.length) {
+        const d = new Date(datesArr[0] + 'T00:00:00');
+        setBulkReminderCalView({ y: d.getFullYear(), m: d.getMonth() });
+      }
+    } else {
+      // New mode: empty dates + empty text, view = today
+      const today = new Date();
+      setBulkReminderModal({
+        kidId: editingKidId,
+        mode: 'new',
+        dates: new Set(),
+        text: '',
+        originalText: '',
+        originalDates: new Set(),
+      });
+      setBulkReminderCalView({ y: today.getFullYear(), m: today.getMonth() });
+    }
+    setBulkReminderCalRange({ from: '', to: '' });
+  };
+  const closeBulkReminderModal = () => {
+    setBulkReminderModal(null);
+    setBulkReminderCalRange({ from: '', to: '' });
+  };
+  const toggleBulkReminderDate = (ds) => {
+    setBulkReminderModal(prev => {
+      const next = new Set(prev.dates);
+      if (next.has(ds)) next.delete(ds); else next.add(ds);
+      return { ...prev, dates: next };
+    });
+  };
+  const addBulkReminderRange = () => {
+    const { from, to } = bulkReminderCalRange;
+    if (!from || !to) { showToast('Pick range dates first', 'warn'); return; }
+    if (from > to) { showToast('From must be before To', 'warn'); return; }
+    const [fy, fm, fd] = from.split('-').map(Number);
+    const [ey, em, ed] = to.split('-').map(Number);
+    const added = [];
+    for (let d = new Date(fy, fm - 1, fd); d <= new Date(ey, em - 1, ed); d.setDate(d.getDate() + 1)) {
+      added.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+    }
+    if (!added.length) { showToast('No dates in range', 'warn'); return; }
+    setBulkReminderModal(prev => {
+      const next = new Set(prev.dates);
+      added.forEach(d => next.add(d));
+      return { ...prev, dates: next };
+    });
+    showToast(`Added ${added.length} date(s)`, 'success');
+    setBulkReminderCalRange({ from: '', to: '' });
+  };
+  const saveBulkReminderModal = async () => {
+    if (!bulkReminderModal || !firebaseRefs) return;
+    const { kidId, dates, text, originalText, originalDates } = bulkReminderModal;
+    const cleanText = (text || '').trim();
+    if (!cleanText) { showToast('Reminder text required', 'warn'); return; }
+    if (dates.size === 0) { showToast('Pick at least 1 date', 'warn'); return; }
+    const { db } = firebaseRefs;
+    const basePath = ['artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids', kidId, 'reminders'];
+    try {
+      const writes = [...dates].map(d => setDoc(doc(db, ...basePath, d), { text: cleanText, updatedAt: Date.now() }));
+      // Edit-mode cleanup: dates removed from this group AND no longer match any other text in DB → delete doc
+      // (Don't blindly delete — if a date was reassigned to another text during this op, keep it.)
+      const deletes = [];
+      if (originalText !== undefined) {
+        const allDocs = bulkReminders[kidId] || {};
+        originalDates.forEach(d => {
+          if (!dates.has(d)) {
+            // This date is no longer in current group. Check if it has a different text elsewhere (shouldn't, but safe).
+            if (allDocs[d] === originalText || allDocs[d] === undefined) {
+              deletes.push(deleteDoc(doc(db, ...basePath, d)));
+            }
+          }
+        });
+      }
+      await Promise.all([...writes, ...deletes]);
+      const msg = `${dates.size} date(s) saved` + (deletes.length ? `, ${deletes.length} removed` : '');
+      showToast(msg, 'success');
+      closeBulkReminderModal();
+    } catch (e) {
+      console.error('Save bulk reminder failed:', e);
+      showToast('Save failed', 'error');
+    }
+  };
+  // Per-date delete (single doc)
+  const deleteBulkReminder = async (date) => {
+    if (!editingKidId || !firebaseRefs) return;
+    if (!window.confirm(`Delete bulk reminder for ${date}?`)) return;
+    try {
+      const { db } = firebaseRefs;
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids', editingKidId, 'reminders', date));
+      showToast('Bulk reminder deleted', 'success');
+    } catch (e) {
+      showToast('Delete failed', 'error');
+    }
+  };
+  // Group delete (all docs sharing this text)
+  const deleteBulkReminderGroup = async (text) => {
+    if (!editingKidId || !firebaseRefs) return;
+    const dates = Object.entries(bulkReminders[editingKidId] || {})
+      .filter(([_, t]) => t === text)
+      .map(([d]) => d);
+    if (!dates.length) return;
+    if (!window.confirm(`Delete "${text}" on ${dates.length} date(s)?`)) return;
+    try {
+      const { db } = firebaseRefs;
+      const basePath = ['artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids', editingKidId, 'reminders'];
+      await Promise.all(dates.map(d => deleteDoc(doc(db, ...basePath, d))));
+      showToast(`Deleted ${dates.length} reminder(s)`, 'success');
+    } catch (e) {
+      showToast('Delete failed', 'error');
     }
   };
 
@@ -1063,6 +1741,31 @@ export default function App() {
       console.error('Clear all failed:', e);
       showToast('Clear failed', 'error');
       setConfirmClearAll(false);
+    }
+  };
+
+  // Resume auto reminder: clear the user override field on daily-notes, so auto bulk reminder shows again
+  const resumeAutoReminder = async () => {
+    if (!editingNoteKidId || !firebaseRefs) return;
+    const { db } = firebaseRefs;
+    const ref = doc(db, 'artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids', editingNoteKidId, 'daily-notes', selectedDate);
+    try {
+      // Use deleteField() to drop reminder but keep other fields (uniform, eca, test, to_bring)
+      await updateDoc(ref, {
+        reminder: deleteField(),
+        updatedAt: Date.now(),
+      });
+      setSheetDraft(prev => ({ ...prev, reminder: '' }));
+      showToast('Resumed auto reminder', 'success');
+    } catch (e) {
+      // If doc doesn't exist yet (no daily-notes), updateDoc throws — fallback to no-op success
+      if (e?.code === 'not-found' || /No document/i.test(e?.message || '')) {
+        setSheetDraft(prev => ({ ...prev, reminder: '' }));
+        showToast('Resumed auto reminder', 'success');
+        return;
+      }
+      console.error('Resume auto reminder failed:', e);
+      showToast('Resume failed', 'error');
     }
   };
 
@@ -1237,74 +1940,20 @@ export default function App() {
   };
 
   if (!isConfigReady) return (
-    <div className="h-screen flex items-center justify-center bg-slate-50">
-      <RefreshCw className="animate-spin text-indigo-600 w-8 h-8" />
+    <div className="h-screen flex items-center justify-center bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50">
+      <RefreshCw className="animate-spin text-amber-600 w-8 h-8" />
     </div>
   );
 
-  if (!activeProfile) {
+  if (!user || !activeProfile) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-white rounded-[2.5rem] shadow-2xl p-8 border border-slate-100">
-          <div className="flex justify-center mb-6">
-            <div className="p-4 bg-indigo-50 rounded-2xl text-indigo-600">
-              {isQuickLoginMode ? <KeyRound size={40} /> : <ShieldCheck size={40} />}
-            </div>
-          </div>
-          <h2 className="text-2xl font-bold text-center mb-8 text-slate-900 uppercase tracking-widest">Family Hub</h2>
-          <div className="space-y-4">
-            {isQuickLoginMode ? (
-              <div className="space-y-4">
-                <input 
-                  type="password" 
-                  inputMode="numeric" 
-                  placeholder="••••" 
-                  className="w-full px-5 py-5 rounded-2xl bg-slate-50 border border-slate-100 outline-none text-center text-3xl font-bold tracking-[0.5em]" 
-                  maxLength={6} 
-                  value={quickCode} 
-                  onChange={(e) => setQuickCode(e.target.value)} 
-                />
-                <button 
-                  onClick={handleQuickLogin} 
-                  className="w-full bg-indigo-600 text-white font-bold py-5 rounded-2xl shadow-xl hover:bg-indigo-700 active:scale-95 transition-all"
-                >
-                  ENTER HUB
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <input 
-                  type="tel" 
-                  placeholder="Phone Number" 
-                  className="w-full px-6 py-4 rounded-2xl bg-slate-50 border border-slate-100 font-bold" 
-                  value={inputPhone} 
-                  onChange={(e) => setInputPhone(e.target.value)} 
-                />
-                <input 
-                  type="text" 
-                  placeholder="Your Name" 
-                  className="w-full px-6 py-4 rounded-2xl bg-slate-50 border border-slate-100 font-bold" 
-                  value={inputProfileName} 
-                  onChange={(e) => setInputProfileName(e.target.value)} 
-                />
-                <button 
-                  onClick={handleFullLogin} 
-                  className="w-full bg-indigo-600 text-white font-bold py-5 rounded-2xl shadow-xl hover:bg-indigo-700 active:scale-95 transition-all"
-                >
-                  LOGIN
-                </button>
-              </div>
-            )}
-            {loginError && <p className="text-xs text-red-500 font-bold text-center uppercase">{loginError}</p>}
-            <button 
-              onClick={() => setIsQuickLoginMode(!isQuickLoginMode)} 
-              className="w-full text-slate-400 font-bold text-xs uppercase mt-4"
-            >
-              Change Login Method
-            </button>
-          </div>
-        </div>
-      </div>
+      <LoginScreen
+        onEmailLogin={handleEmailLogin}
+        onGoogleLogin={handleGoogleLogin}
+        onForgotPassword={handleForgotPassword}
+        error={loginError}
+        loading={loginLoading}
+      />
     );
   }
 
@@ -1319,7 +1968,7 @@ export default function App() {
               <Home size={18} />
             </div>
             <div>
-              <h1 className="text-sm font-bold text-slate-900 uppercase leading-none">{activeProfile.name} Hub</h1>
+              <h1 className="text-sm font-bold text-slate-900 uppercase leading-none">{(hubProfile?.profile?.name || activeProfile.hubKey)} Hub</h1>
               <p className="text-[9px] font-bold text-slate-400 mt-1 uppercase tracking-widest">{APP_VERSION}</p>
             </div>
           </div>
@@ -1363,7 +2012,7 @@ export default function App() {
             >
               <ChevronLeft size={16} />
             </button>
-            <p className="font-bold text-slate-700 text-xs">
+            <p className={`font-bold text-xs ${new Date(selectedDate).getDay() === 0 ? 'text-red-500' : 'text-slate-700'}`}>
               {new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
             </p>
             <button 
@@ -1502,12 +2151,11 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* 5 horizontal long rows: Dress code / ECA / Test / To-bring / Reminder (last) — same order as edit sheet */}
+                  {/* 4 horizontal long rows: ECA / Test / To-bring / Reminder — Dress code shown as top pill above */}
                   <div className="space-y-2">
                     {(() => {
                       const note = dailyNotes[kid.id] || {};
                       const rowSpecs = [
-                        { key: 'uniform',  label: 'Dress code', Icon: Shirt },
                         { key: 'eca',      label: 'ECA',        Icon: ECAIcon },
                         { key: 'test',     label: 'Test',       Icon: GraduationCap },
                         { key: 'to_bring', label: 'To-bring',   Icon: Backpack },
@@ -1516,16 +2164,21 @@ export default function App() {
                       return rowSpecs.map(({ key, label, Icon }) => {
                         // ECA display: auto (from profile) + custom note (manual), joined by newline
                         let value = note[key];
-                        if (key === 'uniform') {
-                          const manualU = (note.uniform || '').trim();
-                          value = manualU || translateDressCode(uniformAuto) || 'Uniform';
-                        } else if (key === 'eca') {
+                        if (key === 'eca') {
                           const manual = (note.eca || '').trim();
                           if (autoEcaText && manual) value = `${autoEcaText}\n${manual}`;
                           else if (autoEcaText) value = autoEcaText;
                           else value = manual;
                         }
-                        const hasAuto = key === 'eca' && !!autoEcaText;
+                        if (key === 'reminder') {
+                          const manual = (note.reminder || '').trim();
+                          const autoRem = getAutoReminderText(kid.id, selectedDate);
+                          // Display order: user override (if any) > auto
+                          if (manual) value = manual;
+                          else if (autoRem) value = autoRem;
+                          else value = '';
+                        }
+                        const hasAuto = (key === 'eca' && !!autoEcaText) || (key === 'reminder' && !!getAutoReminderText(kid.id, selectedDate));
                         return (
                           <button
                             key={key}
@@ -1923,7 +2576,7 @@ export default function App() {
                 <p className="text-[10px] text-slate-400 mb-2">e.g. Piano Mon 16:00, Swimming 15th monthly</p>
 
                 {(kidForm.eca_recurring || []).map((eca, idx) => {
-                  const keys = ['mon','tue','wed','thu','fri','sat','sun'];
+                  const keys = ['sun','mon','tue','wed','thu','fri','sat'];
                   const labels = { mon:'Mon', tue:'Tue', wed:'Wed', thu:'Thu', fri:'Fri', sat:'Sat', sun:'Sun' };
                   return (
                     <div key={idx} className="bg-slate-50 rounded-xl p-3 mb-2 border border-slate-100">
@@ -2021,13 +2674,13 @@ export default function App() {
                           const ymd = (y, m, d) => `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                           const firstOfMonth = new Date(view.y, view.m, 1);
                           const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
-                          const firstDow = (firstOfMonth.getDay() + 6) % 7;
+                          const firstDow = firstOfMonth.getDay();
                           const cells = [];
                           for (let i = 0; i < firstDow; i++) cells.push(null);
                           for (let dom = 1; dom <= daysInMonth; dom++) {
                             const d = new Date(view.y, view.m, dom);
                             const ds = ymd(view.y, view.m, dom);
-                            const dowKey = WEEKDAY_KEYS_FULL[(d.getDay() + 6) % 7];
+                            const dowKey = WEEKDAY_KEYS_FULL[d.getDay()];
                             cells.push({ ds, dom, d, dowKey });
                           }
                           const datesSet = new Set(eca.dates || []);
@@ -2066,7 +2719,7 @@ export default function App() {
                             const [ey, em, ed] = skipCalRange.to.split('-').map(Number);
                             const added = [];
                             for (let d = new Date(fy, fm - 1, fd); d <= new Date(ey, em - 1, ed); d.setDate(d.getDate() + 1)) {
-                              if ((d.getDay() + 6) % 7 === targetPy) added.push(ymd(d.getFullYear(), d.getMonth(), d.getDate()));
+                              if (d.getDay() === targetPy) added.push(ymd(d.getFullYear(), d.getMonth(), d.getDate()));
                             }
                             if (!added.length) { showToast(`No ${target} in range`, 'warn'); return; }
                             const merged = Array.from(new Set([...(eca.dates || []), ...added])).sort();
@@ -2090,16 +2743,19 @@ export default function App() {
                               </div>
                               <div className="grid grid-cols-7 gap-1 text-center mb-1">
                                 {WEEKDAY_KEYS_FULL.map(k => (
-                                  <div key={k} className="text-[9px] font-bold text-slate-400 uppercase">{WEEKDAY_LABELS[k]}</div>
+                                  <div key={k} className={`text-[9px] font-bold uppercase ${k === 'sun' ? SUN_HEADER_CLS : 'text-slate-400'}`}>{WEEKDAY_LABELS[k]}</div>
                                 ))}
                               </div>
                               <div className="grid grid-cols-7 gap-1">
                                 {cells.map((c, i) => {
                                   if (!c) return <div key={'b' + i} />;
                                   const selected = datesSet.has(c.ds);
+                                  const isSun = c.dowKey === 'sun';
                                   const cls = selected
                                     ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                                    : 'bg-slate-50 text-slate-700 hover:bg-slate-200';
+                                    : isSun
+                                      ? 'bg-slate-50 text-red-500 hover:bg-slate-200'
+                                      : 'bg-slate-50 text-slate-700 hover:bg-slate-200';
                                   return (
                                     <button
                                       key={c.ds}
@@ -2201,6 +2857,111 @@ export default function App() {
                 </button>
               </div>
 
+              {/* ── Bulk Reminders (auto reminder source) ─────────────────────────────────── */}
+              <div className="pt-2 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                    <Bell size={12} /> Bulk Reminders (auto)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => openBulkReminderModal(null)}
+                    disabled={!editingKidId}
+                    className="text-[10px] font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-800 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                  >
+                    <Plus size={11} /> Add
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-400 mb-2 leading-snug">
+                  {editingKidId
+                    ? 'e.g. Buy concert ticket on concert day, Bring PE kit on PE day. User can still override per-day in Schedule tab.'
+                    : 'Save kid first to enable bulk reminders.'}
+                </p>
+
+                {editingKidId && (() => {
+                  // Group all (date, text) docs by text — like ECA pattern: one row per text + date chips
+                  const all = Object.entries(bulkReminders[editingKidId] || {});
+                  if (!all.length) {
+                    return <p className="text-[10px] text-slate-300 italic py-2">No bulk reminders yet — tap "+ Add" to set up.</p>;
+                  }
+                  const grouped = {};
+                  all.forEach(([date, text]) => {
+                    if (!grouped[text]) grouped[text] = [];
+                    grouped[text].push(date);
+                  });
+                  // Sort groups by their earliest date
+                  const sortedGroups = Object.entries(grouped)
+                    .sort(([, a], [, b]) => a.sort()[0].localeCompare(b.sort()[0]));
+                  const COLLAPSE_DELAY = 12;
+                  return (
+                    <div className="space-y-2">
+                      {sortedGroups.map(([text, dates]) => {
+                        const sortedDates = dates.slice().sort();
+                        const isExpanded = expandedBulkReminderGroups.has(text);
+                        const visible = isExpanded ? sortedDates : sortedDates.slice(0, COLLAPSE_DELAY);
+                        const hidden = sortedDates.length - visible.length;
+                        return (
+                          <div key={text} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                            <div className="flex items-start gap-2 mb-2">
+                              <span className="text-sm font-bold text-slate-700 flex-1 min-w-0 break-words">{text}</span>
+                              <button
+                                type="button"
+                                onClick={() => openBulkReminderModal({ text })}
+                                className="text-slate-300 hover:text-indigo-600 p-1 shrink-0"
+                                title="Edit group"
+                              >
+                                <Pencil size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => deleteBulkReminderGroup(text)}
+                                className="text-slate-300 hover:text-red-500 p-1 shrink-0"
+                                title="Delete group"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {visible.map(d => (
+                                <span key={d} className="bg-white px-2 py-0.5 rounded-md text-[10px] font-bold text-slate-500 flex items-center gap-1 border border-slate-100">
+                                  {d}
+                                  <button
+                                    type="button"
+                                    onClick={() => deleteBulkReminder(d)}
+                                    className="text-slate-300 hover:text-red-500"
+                                    title={`Remove reminder on ${d}`}
+                                  >
+                                    <X size={10} />
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                            {hidden > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleBulkReminderExpand(text)}
+                                className="mt-1 text-[10px] font-bold text-indigo-600 uppercase tracking-widest hover:text-indigo-800"
+                              >
+                                Show all {sortedDates.length} dates ▾
+                              </button>
+                            )}
+                            {isExpanded && sortedDates.length > COLLAPSE_DELAY && (
+                              <button
+                                type="button"
+                                onClick={() => toggleBulkReminderExpand(text)}
+                                className="mt-1 text-[10px] font-bold text-slate-400 uppercase tracking-widest hover:text-slate-600"
+                              >
+                                Shrink ▴
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
               <button
                 onClick={handleSaveKid}
                 className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold uppercase text-sm shadow-lg"
@@ -2219,12 +2980,12 @@ export default function App() {
           const dateLabel = new Date(selectedDate).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
           const sheetAutoEcas = getECAsForDate(sheetKid, selectedDate);
           const sheetAutoEcaText = formatECAList(sheetAutoEcas);
+          const sheetAutoReminder = getAutoReminderText(editingNoteKidId, selectedDate);
           const fields = [
             { key: 'uniform',  label: 'Dress code',  Icon: Shirt,         placeholder: 'e.g. Sportswear (override today)' },
             { key: 'eca',      label: 'ECA note', Icon: ECAIcon,        placeholder: 'e.g. Piano 4pm' },
             { key: 'test',     label: 'Test',     Icon: GraduationCap, placeholder: 'e.g. Math quiz ch3' },
             { key: 'to_bring', label: 'To-bring',     Icon: Backpack,      placeholder: 'e.g. Water bottle + PE kit' },
-            { key: 'reminder', label: 'Reminder',     Icon: Bell,          placeholder: 'e.g. Leave 10 min early' },
           ];
           return (
             <div className="fixed inset-0 bg-slate-900/50 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={closeNoteSheet}>
@@ -2242,11 +3003,11 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Uniform / Test / To-bring / Reminder — simple textareas */}
-                {fields.filter(f => f.key !== 'eca').map(({ key, label, Icon, placeholder }) => (
+                {/* Uniform / Test / To-bring — simple textareas */}
+                {fields.filter(f => f.key !== 'eca').map(({ key, label, Icon: FieldIcon, placeholder }) => (
                   <div key={key}>
                     <label className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 ${sheetColor.text}`}>
-                      <Icon size={12} /> {label}
+                      <FieldIcon size={12} /> {label}
                     </label>
                     <textarea
                       value={sheetDraft[key] || ''}
@@ -2257,6 +3018,47 @@ export default function App() {
                     />
                   </div>
                 ))}
+
+                {/* Reminder — Auto (read-only, if any) + manual override + Resume */}
+                <div>
+                  <label className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 ${sheetColor.text}`}>
+                    <Bell size={12} /> Reminder
+                    {sheetAutoReminder && (
+                      <span className="ml-auto text-[9px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-md normal-case tracking-normal flex items-center gap-1">
+                        <span>🔒</span><span>Auto from profile</span>
+                      </span>
+                    )}
+                  </label>
+                  {sheetAutoReminder && (
+                    <div className="mt-1 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm font-bold text-amber-900 whitespace-pre-wrap break-words">
+                      {sheetAutoReminder}
+                    </div>
+                  )}
+                  <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-2">
+                    Reminder note (manual override, optional)
+                  </label>
+                  <textarea
+                    value={sheetDraft.reminder || ''}
+                    onChange={(e) => setSheetDraft(prev => ({ ...prev, reminder: e.target.value }))}
+                    placeholder="e.g. Leave 10 min early"
+                    rows={2}
+                    className="w-full bg-slate-50 px-4 py-3 rounded-xl font-bold outline-none border border-slate-100 mt-1 text-sm resize-none"
+                  />
+                  {sheetAutoReminder && (sheetDraft.reminder || '').trim() && (
+                    <button
+                      type="button"
+                      onClick={resumeAutoReminder}
+                      className="mt-2 w-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-1.5"
+                    >
+                      <RefreshCw size={12} /> Resume auto reminder
+                    </button>
+                  )}
+                  <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                    {sheetAutoReminder
+                      ? <>Auto from kid profile stays unless you write a manual override. Click <strong>Resume</strong> above to clear your note and let auto show again.</>
+                      : <>No auto reminder from kid profile for today. Add your own here.</>}
+                  </p>
+                </div>
 
                 {/* ECA — Auto (read-only, if any) + Note (manual override) */}
                 <div>
@@ -2306,6 +3108,142 @@ export default function App() {
                   </button>
                   <button
                     onClick={saveNoteSheet}
+                    className="bg-indigo-600 text-white py-3 rounded-xl font-bold uppercase text-sm shadow-lg"
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ===== Bulk Reminder modal (Kid profile edit panel) ===== */}
+        {bulkReminderModal && (() => {
+          const modalKid = kids.find(k => k.id === bulkReminderModal.kidId);
+          if (!modalKid) return null;
+          const modalColor = KID_COLORS.find(c => c.name === modalKid.color) || KID_COLORS[0];
+          const isEdit = bulkReminderModal.mode === 'edit';
+          const view = bulkReminderCalView;
+          const ymd = (y, m, d) => `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const firstOfMonth = new Date(view.y, view.m, 1);
+          const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
+          const firstDow = firstOfMonth.getDay();
+          const cells = [];
+          for (let i = 0; i < firstDow; i++) cells.push(null);
+          for (let dom = 1; dom <= daysInMonth; dom++) {
+            const d = new Date(view.y, view.m, dom);
+            const dowKey = WEEKDAY_KEYS_FULL[d.getDay()];
+            cells.push({ ds: ymd(view.y, view.m, dom), dom, dowKey });
+          }
+          const datesSet = bulkReminderModal.dates;
+          const monthLabel = new Date(view.y, view.m, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+          function shiftMonth(delta) {
+            let { y, m } = view;
+            m += delta;
+            if (m < 0) { m += 12; y -= 1; }
+            if (m > 11) { m -= 12; y += 1; }
+            setBulkReminderCalView({ y, m });
+          }
+          return (
+            <div className="fixed inset-0 bg-slate-900/60 z-[80] flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={closeBulkReminderModal}>
+              <div className="bg-white rounded-t-3xl sm:rounded-3xl w-full max-w-lg p-6 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                      <Bell size={16} className={modalColor.text} />
+                      {isEdit ? 'Edit bulk reminder' : 'Add bulk reminder'}
+                    </h3>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">
+                      {modalKid.name} • auto reminder source
+                    </p>
+                  </div>
+                  <button onClick={closeBulkReminderModal} className="p-2 text-slate-300 hover:text-slate-600 rounded-lg">
+                    <X size={20} />
+                  </button>
+                </div>
+
+                {/* Calendar multi-select — always shown so edit can add/remove dates */}
+                <div className="bg-white rounded-xl p-3 border border-slate-200 shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <button type="button" onClick={() => shiftMonth(-1)} className="p-1 bg-slate-100 rounded-lg"><ChevronLeft size={14} /></button>
+                    <span className="text-xs font-bold text-slate-700">{monthLabel}</span>
+                    <button type="button" onClick={() => shiftMonth(1)} className="p-1 bg-slate-100 rounded-lg"><ChevronRight size={14} /></button>
+                  </div>
+                  <div className="grid grid-cols-7 gap-1 text-center mb-1">
+                    {WEEKDAY_KEYS_FULL.map(k => (
+                      <div key={k} className={`text-[9px] font-bold uppercase ${k === 'sun' ? SUN_HEADER_CLS : 'text-slate-400'}`}>{WEEKDAY_LABELS[k]}</div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-7 gap-1">
+                    {cells.map((c, i) => {
+                      if (!c) return <div key={'b' + i} />;
+                      const selected = datesSet.has(c.ds);
+                      const isSun = c.dowKey === 'sun';
+                      return (
+                        <button
+                          key={c.ds}
+                          type="button"
+                          onClick={() => toggleBulkReminderDate(c.ds)}
+                          className={`h-8 rounded text-[11px] font-bold ${selected ? 'bg-indigo-600 text-white hover:bg-indigo-700' : isSun ? 'bg-slate-50 text-red-500 hover:bg-slate-200' : 'bg-slate-50 text-slate-700 hover:bg-slate-200'}`}
+                          title={c.ds}
+                        >
+                          {c.dom}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Bulk range adder */}
+                  <div className="mt-3 pt-2 border-t border-slate-100 space-y-2">
+                    <div>
+                      <div className="text-[9px] font-bold text-slate-400 uppercase mb-1">Bulk: add every date in range</div>
+                      <div className="flex items-center gap-1">
+                        <input type="date" value={bulkReminderCalRange.from} onChange={(e) => setBulkReminderCalRange(prev => ({ ...prev, from: e.target.value }))} className="flex-1 min-w-0 bg-slate-50 px-2 py-1 rounded text-xs font-bold border border-slate-100" />
+                        <span className="text-[10px] text-slate-400">to</span>
+                        <input type="date" value={bulkReminderCalRange.to} onChange={(e) => setBulkReminderCalRange(prev => ({ ...prev, to: e.target.value }))} className="flex-1 min-w-0 bg-slate-50 px-2 py-1 rounded text-xs font-bold border border-slate-100" />
+                        <button type="button" onClick={addBulkReminderRange} className="bg-slate-200 text-slate-700 px-3 py-1 rounded text-[10px] font-bold uppercase whitespace-nowrap">Add</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-100">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase">
+                      {datesSet.size} date(s) selected
+                    </span>
+                    {datesSet.size > 0 && (
+                      <button type="button" onClick={() => setBulkReminderModal(prev => ({ ...prev, dates: new Set() }))} className="text-[10px] font-bold text-red-400 uppercase tracking-widest hover:text-red-600">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Reminder text */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Reminder text</label>
+                  <textarea
+                    value={bulkReminderModal.text}
+                    onChange={(e) => setBulkReminderModal(prev => ({ ...prev, text: e.target.value }))}
+                    placeholder="e.g. Bring concert ticket + ID"
+                    rows={2}
+                    autoFocus={!isEdit}
+                    className="w-full bg-slate-50 px-4 py-3 rounded-xl font-bold outline-none border border-slate-100 mt-1 text-sm resize-none"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1 leading-snug">
+                    Applies to all {datesSet.size} date(s) above. User can still override per-day in Schedule tab.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+                  <button
+                    onClick={closeBulkReminderModal}
+                    className="bg-slate-100 text-slate-600 py-3 rounded-xl font-bold uppercase text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveBulkReminderModal}
                     className="bg-indigo-600 text-white py-3 rounded-xl font-bold uppercase text-sm shadow-lg"
                   >
                     Save
@@ -2625,8 +3563,44 @@ export default function App() {
                 <Info size={14} /> Profile
               </h3>
               <div className="space-y-3">
+                {/* Hub Name (admin-editable, shown in header) */}
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                   <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Hub Name</p>
+                  {activeProfile.role === 'admin' && editingHubName ? (
+                    <div className="flex items-center gap-2 mt-1">
+                      <input
+                        type="text"
+                        value={hubNameDraft}
+                        onChange={(e) => setHubNameDraft(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveHubName()}
+                        className="flex-1 px-3 py-2 bg-white rounded-lg font-bold text-xs outline-none border border-indigo-200"
+                        autoFocus
+                      />
+                      <button onClick={handleSaveHubName} className="p-2 bg-indigo-600 text-white rounded-lg">
+                        <CheckCircle2 size={14} />
+                      </button>
+                      <button onClick={() => { setEditingHubName(false); setHubNameDraft(''); }} className="p-2 bg-slate-200 text-slate-600 rounded-lg">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <p className="font-bold text-sm text-slate-700">{hubProfile?.profile?.name || activeProfile.hubKey}</p>
+                      {activeProfile.role === 'admin' && (
+                        <button
+                          onClick={() => { setEditingHubName(true); setHubNameDraft(hubProfile?.profile?.name || ''); }}
+                          className="p-1.5 text-slate-300 hover:text-indigo-500 rounded-lg"
+                        >
+                          <Info size={14} />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* User's own display name */}
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Your Name</p>
                   {editingProfileName ? (
                     <div className="flex items-center gap-2 mt-1">
                       <input
@@ -2657,10 +3631,6 @@ export default function App() {
                   )}
                 </div>
                 <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-1">Phone</p>
-                  <p className="font-bold text-sm text-slate-700">{activeProfile.phone}</p>
-                </div>
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                   <p className="text-[9px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1.5">
                     Hub ID <span className="text-slate-300 normal-case font-normal">— tap to copy</span>
                   </p>
@@ -2688,58 +3658,125 @@ export default function App() {
               </div>
             </div>
 
-            {/* ─── Manage PINs ─────────────────────────────────────────────────── */}
+            {/* ─── Members (admin only) ─────────────────────────────────────────── */}
+            {activeProfile?.role === 'admin' && (
+              <div className="bg-white rounded-[2rem] p-6 shadow-sm border border-slate-100">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xs font-bold text-indigo-600 uppercase flex items-center gap-2">
+                    <Users2 size={14} /> Members ({members.length})
+                  </h3>
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => setInviteAdultOpen(true)}
+                      className="bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase active:scale-95 flex items-center gap-1"
+                    >
+                      <UserPlus size={11} /> Adult
+                    </button>
+                    <button
+                      onClick={() => setInviteChildOpen(true)}
+                      className="bg-amber-500 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase active:scale-95 flex items-center gap-1"
+                    >
+                      <UserPlus size={11} /> Child
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {members.map(m => (
+                    <div key={m.uid} className="bg-slate-50 p-3 rounded-xl">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-bold text-slate-800 truncate">{m.display_name}</p>
+                            <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full ${
+                              m.role === 'admin' ? 'bg-indigo-100 text-indigo-700' :
+                              m.role === 'child' ? 'bg-amber-100 text-amber-700' :
+                              'bg-slate-200 text-slate-600'
+                            }`}>
+                              {m.role}
+                            </span>
+                            {m.status === 'disabled' && (
+                              <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-red-100 text-red-600">
+                                disabled
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-400 truncate">
+                            {m.email || m.synthetic_email}
+                            {m.username && ` · @${m.username}`}
+                          </p>
+                          {m.needs_password_setup && (
+                            <p className="text-[9px] text-amber-600 mt-1">⏳ Setup pending</p>
+                          )}
+                        </div>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const fn = httpsCallable(firebaseRefs.functions, 'resetMemberPassword');
+                              const res = await fn({ uid: m.uid });
+                              setInviteResult({
+                                display_name: m.display_name,
+                                email: res.data.email,
+                                role: 'member',
+                                created: false,
+                                setup_link: res.data.setup_link,
+                                email_sent: res.data.email_sent,
+                                email_error: res.data.email_error,
+                              });
+                            } catch (e) {
+                              showToast(e.message || 'Reset failed', 'error');
+                            }
+                          }}
+                          className="bg-white border border-slate-200 px-2 py-1 rounded-lg text-[9px] font-bold uppercase text-slate-500 active:scale-95"
+                          title="Send password reset email"
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {members.length === 0 && (
+                    <p className="text-[10px] text-slate-400 text-center py-4">No members yet</p>
+                  )}
+                </div>
+                <p className="text-[9px] text-slate-400 mt-3 leading-relaxed">
+                  💡 Invite actions generate CLI commands. Open WSL terminal & paste to execute.
+                </p>
+              </div>
+            )}
+
+            {/* ─── Security (Change Password) ────────────────────────────────── */}
             <div className="bg-white rounded-[2rem] p-6 shadow-sm border border-slate-100">
               <h3 className="text-xs font-bold text-indigo-600 uppercase mb-4 flex items-center gap-2">
-                <Zap size={14} /> Manage PINs
+                <Lock size={14} /> Security
               </h3>
-              <p className="text-[11px] text-slate-500 mb-4">
-                Use a PIN for quick login. Manage existing PINs or add a new one.
-              </p>
-
-              {/* List of existing PINs */}
-              <div className="space-y-2 mb-4">
-                {existingPins.length === 0 ? (
-                  <div className="text-[11px] text-slate-400 italic px-2 py-3 bg-slate-50 rounded-xl">
-                    No PINs yet — add one below.
+              <div className="space-y-3">
+                <div className="flex items-center justify-between bg-slate-50 p-3 rounded-xl">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">Password</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      {user?.providerData?.[0]?.providerId === 'google.com'
+                        ? 'Signed in with Google'
+                        : 'Last changed: unknown'}
+                    </p>
                   </div>
-                ) : (
-                  existingPins.map(p => (
-                    <div key={p.pin} className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-xl border border-slate-100">
-                      <div className="flex items-center gap-3">
-                        <KeyRound size={14} className="text-indigo-400" />
-                        <span className="font-mono font-bold tracking-[0.4em] text-slate-700">{p.pin}</span>
-                      </div>
-                      <button
-                        onClick={() => handleDeletePin(p.pin)}
-                        className="p-2 text-slate-300 hover:text-red-500 rounded-lg"
-                        title="Delete this PIN"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  ))
+                  <button
+                    onClick={() => {
+                      setChangePwdOpen(true);
+                      setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
+                      setChangePwdError(null);
+                    }}
+                    disabled={user?.providerData?.[0]?.providerId === 'google.com'}
+                    className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase active:scale-95 transition-transform disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Change
+                  </button>
+                </div>
+                {user?.providerData?.[0]?.providerId === 'google.com' && (
+                  <p className="text-[10px] text-slate-400 leading-relaxed">
+                    Google sign-in users manage their password through Google Account settings.
+                  </p>
                 )}
               </div>
-
-              {/* Add new PIN */}
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  placeholder="New PIN (4-6 digits)"
-                  maxLength={6}
-                  className="flex-1 bg-slate-50 px-4 py-3 rounded-xl font-bold text-center tracking-widest border border-slate-100"
-                  value={newPin}
-                  onChange={(e) => { setNewPin(e.target.value.replace(/\D/g, '')); setPinError(null); }}
-                />
-                <button
-                  onClick={handleSetNewPin}
-                  className="bg-indigo-600 text-white px-5 rounded-xl text-xs font-bold uppercase"
-                >
-                  Add
-                </button>
-              </div>
-              {pinError && <p className="text-[11px] text-red-500 font-bold mt-2">{pinError}</p>}
             </div>
 
             {/* ─── Log Out ──────────────────────────────────────────────────────── */}
@@ -2781,6 +3818,120 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {inviteAdultOpen && (
+        <InviteAdultModal
+          hubKey={activeProfile?.hubKey}
+          functions={firebaseRefs?.functions}
+          onClose={() => setInviteAdultOpen(false)}
+          onResult={setInviteResult}
+        />
+      )}
+
+      {inviteChildOpen && (
+        <InviteChildModal
+          hubKey={activeProfile?.hubKey}
+          kids={membersKids.length > 0 ? membersKids : kids}
+          functions={firebaseRefs?.functions}
+          onClose={() => setInviteChildOpen(false)}
+          onResult={setInviteResult}
+        />
+      )}
+
+      {inviteResult && (
+        <InviteResultModal result={inviteResult} onClose={() => setInviteResult(null)} />
+      )}
+
+      {changePwdOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
+          <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden">
+            <div className="p-6 border-b flex justify-between items-center bg-gradient-to-r from-amber-50 to-orange-50">
+              <div className="flex items-center gap-2">
+                <Lock size={18} className="text-amber-600" />
+                <h2 className="text-sm font-bold text-slate-900 uppercase">Change Password</h2>
+              </div>
+              <button
+                onClick={() => { setChangePwdOpen(false); setChangePwdError(null); }}
+                className="p-2 text-slate-300 bg-white rounded-xl"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-6 space-y-3">
+              {changePwdError && (
+                <div className="bg-red-50 text-red-700 p-3 rounded-xl text-xs border border-red-100">
+                  {changePwdError}
+                </div>
+              )}
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Current password</label>
+                <input
+                  type="password"
+                  autoFocus
+                  value={currentPwd}
+                  onChange={(e) => { setCurrentPwd(e.target.value); setChangePwdError(null); }}
+                  disabled={changePwdLoading}
+                  className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50"
+                  autoComplete="current-password"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">New password (8+ chars)</label>
+                <input
+                  type="password"
+                  value={newPwd}
+                  onChange={(e) => { setNewPwd(e.target.value); setChangePwdError(null); }}
+                  disabled={changePwdLoading}
+                  className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50"
+                  autoComplete="new-password"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Confirm new password</label>
+                <input
+                  type="password"
+                  value={confirmPwd}
+                  onChange={(e) => { setConfirmPwd(e.target.value); setChangePwdError(null); }}
+                  disabled={changePwdLoading}
+                  className="w-full mt-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl font-bold focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50"
+                  autoComplete="new-password"
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => { setChangePwdOpen(false); setChangePwdError(null); }}
+                  disabled={changePwdLoading}
+                  className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold uppercase disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!currentPwd) { setChangePwdError('請輸入現有密碼'); return; }
+                    if (newPwd.length < 8) { setChangePwdError('新密碼至少 8 個字元'); return; }
+                    if (newPwd !== confirmPwd) { setChangePwdError('新密碼兩次輸入唔一致'); return; }
+                    if (newPwd === currentPwd) { setChangePwdError('新密碼唔可以同舊的一樣'); return; }
+                    setChangePwdLoading(true);
+                    const res = await handleChangePassword(currentPwd, newPwd);
+                    setChangePwdLoading(false);
+                    if (res.ok) {
+                      setChangePwdOpen(false);
+                      setCurrentPwd(''); setNewPwd(''); setConfirmPwd('');
+                      alert('✓ 密碼已更新');
+                    } else {
+                      setChangePwdError(res.error || '改密碼失敗');
+                    }
+                  }}
+                  disabled={changePwdLoading || !currentPwd || !newPwd || !confirmPwd}
+                  className="flex-1 py-3 bg-amber-500 text-white rounded-xl text-xs font-bold uppercase active:scale-95 transition-transform disabled:opacity-50 shadow-md"
+                >
+                  {changePwdLoading ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isLibraryOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
