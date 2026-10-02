@@ -1259,8 +1259,8 @@ export default function App() {
     } else {
       setKidForm({ ...blankKid, uniform_schedule: blankUniformSchedule(), school_holidays: [], eca_recurring: [] });
       setEditingKidId(null);
+      originalBulkRemindersRef.current = null;
     }
-    originalBulkRemindersRef.current = null;
     setExpandedEcaDates(new Set());  // reset expand state — ECA indices are per-form
     setShowKidForm(true);
   };
@@ -1403,8 +1403,9 @@ export default function App() {
     const updatedECAs = [];
     for (const newE of newECAs) {
       const oldE = oldECAs.find(e => e.name === newE.name);
-      if (oldE && JSON.stringify({ d: oldE.dates, t: oldE.start_time, dc: oldE.dress_code }) !==
-                 JSON.stringify({ d: newE.dates, t: newE.start_time, dc: newE.dress_code })) {
+      // NOTE: must compare end_time too — otherwise changing only end_time shows "No changes".
+      if (oldE && JSON.stringify({ d: oldE.dates, t: oldE.start_time, e: oldE.end_time, dc: oldE.dress_code }) !==
+                 JSON.stringify({ d: newE.dates, t: newE.start_time, e: newE.end_time, dc: newE.dress_code })) {
         updatedECAs.push(newE.name);
       }
     }
@@ -1422,7 +1423,7 @@ export default function App() {
     const name = kidForm.name.trim();
     if (!name) { showToast('Kid name is required', 'warn'); return; }
     const payload = buildKidPayload();
-    // For edits, show confirm dialog with diff; for new kids, save directly
+    // For edits, compute diff for summary toast; for new kids, save directly
     if (editingKidId) {
       const originalKid = kids.find(k => k.id === editingKidId);
       const diff = computeKidDiff(originalKid, payload);
@@ -1445,21 +1446,30 @@ export default function App() {
         originalBulkRemindersRef.current = null;
         return;
       }
-      setConfirmKidSave({ payload, diff });
+      // Save directly (no confirm dialog — user found it confusing). Toast summarises changes.
+      const summary = diff.map(c => c.label).slice(0, 3).join(', ') + (diff.length > 3 ? ` +${diff.length - 3} more` : '');
+      performKidSave(payload, `Saved: ${summary}`);
     } else {
       performKidSave(payload);
     }
   };
 
-  const performKidSave = async (payload) => {
-    if (!firebaseRefs) { showToast('Not ready — try again', 'warn'); return; }
+  const performKidSave = async (payload, successMsg = 'Kid updated') => {
+    if (!firebaseRefs || !activeProfile) { showToast('Not ready — try again', 'warn'); return; }
     try {
       if (editingKidId) {
-        await setDoc(getHubRef('kids', editingKidId), payload, { merge: true });
-        showToast('Kid updated', 'success');
+        const ref = getHubRef('kids', editingKidId);
+        // Build the patch: all payload fields except createdAt
+        const patch = {};
+        for (const [k, v] of Object.entries(payload)) {
+          if (k === 'createdAt') continue;
+          patch[k] = v;
+        }
+        await updateDoc(ref, patch);
+        showToast(successMsg, 'success');
       } else {
         await addDoc(getHubRef('kids'), { ...payload, createdAt: Date.now() });
-        showToast('Kid added', 'success');
+        showToast(successMsg === 'Kid updated' ? 'Kid added' : successMsg, 'success');
       }
       setShowKidForm(false);
       setConfirmKidSave(null);
