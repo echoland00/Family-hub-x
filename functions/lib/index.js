@@ -19,7 +19,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createHub = exports.resetMemberPassword = exports.changeRole = exports.removeMember = exports.listKidsForInvite = exports.listMembers = exports.inviteChild = exports.inviteMember = void 0;
+exports.checkEmailExists = exports.createHub = exports.resetMemberPassword = exports.changeRole = exports.removeMember = exports.listKidsForInvite = exports.listMembers = exports.inviteChild = exports.inviteMember = void 0;
 const https_1 = require("firebase-functions/v2/https");
 const app_1 = require("firebase-admin/app");
 const auth_1 = require("firebase-admin/auth");
@@ -595,5 +595,25 @@ exports.createHub = (0, https_1.onCall)(async (req) => {
         at: firestore_1.FieldValue.serverTimestamp(),
     });
     return { ok: true, hubKey, hubName };
+});
+// === Callable: checkEmailExists ===
+// Pre-check before "Create new Hub" submission. Returns { exists: bool }.
+// Uses Admin SDK auth.getUserByEmail which throws auth/user-not-found if absent.
+exports.checkEmailExists = (0, https_1.onCall)(async (req) => {
+    const data = req.data;
+    const email = (data.email || "").trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new https_1.HttpsError("invalid-argument", "email-invalid");
+    }
+    try {
+        const user = await auth.getUserByEmail(email);
+        return { exists: true, uid: user.uid };
+    }
+    catch (e) {
+        if (e.code === "auth/user-not-found") {
+            return { exists: false };
+        }
+        throw new https_1.HttpsError("internal", "email-check-failed: " + (e.message || "unknown"));
+    }
 });
 //# sourceMappingURL=index.js.map

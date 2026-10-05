@@ -662,3 +662,23 @@ export const createHub = onCall(async (req) => {
 
   return { ok: true, hubKey, hubName };
 });
+
+// === Callable: checkEmailExists ===
+// Pre-check before "Create new Hub" submission. Returns { exists: bool }.
+// Uses Admin SDK auth.getUserByEmail which throws auth/user-not-found if absent.
+export const checkEmailExists = onCall(async (req) => {
+  const data = req.data as { email?: string };
+  const email = (data.email || "").trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpsError("invalid-argument", "email-invalid");
+  }
+  try {
+    const user = await auth.getUserByEmail(email);
+    return { exists: true, uid: user.uid };
+  } catch (e: any) {
+    if (e.code === "auth/user-not-found") {
+      return { exists: false };
+    }
+    throw new HttpsError("internal", "email-check-failed: " + (e.message || "unknown"));
+  }
+});

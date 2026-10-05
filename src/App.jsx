@@ -667,11 +667,11 @@ function CreateHubForm({ onCreateHub, loading, showCredentials = false, prefillE
   );
 }
 
-function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, onSignUp, onCreateHub, onSignOut, error, loading, defaultTab }) {
-  // Two distinct states:
-  //   A) !user → tabs [登入] / [註冊帳號]
-  //   B) user && !activeProfile → only "建立新 Hub" form (signed in but no hub claim)
-  const [tab, setTab] = useState(defaultTab || (user ? 'create' : 'signin'));
+function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, onCreateHub, onSignOut, error, loading, defaultTab }) {
+  // Two states:
+  //   A) !user → tabs [建立新 Hub] / [登入] (default 'create')
+  //   B) user && !activeProfile → only "建立新 Hub" form (no creds) + 登出
+  const [tab, setTab] = useState(defaultTab || (user ? 'create' : 'create'));
   const isSignedInNoHub = !!user;
 
   return (
@@ -696,20 +696,20 @@ function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, o
         {!isSignedInNoHub && (
           <div className="flex gap-1 p-1 bg-slate-100 rounded-xl mb-6">
             <button
+              onClick={() => setTab('create')}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
+                tab === 'create' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              建立新 Hub
+            </button>
+            <button
               onClick={() => setTab('signin')}
               className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
                 tab === 'signin' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
               }`}
             >
               登入
-            </button>
-            <button
-              onClick={() => setTab('signup')}
-              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
-                tab === 'signup' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              註冊帳號
             </button>
           </div>
         )}
@@ -731,16 +731,17 @@ function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, o
             showCredentials={false}
             prefillEmail={user.email}
           />
-        ) : tab === 'signin' ? (
+        ) : tab === 'create' ? (
+          <CreateHubForm
+            onCreateHub={onCreateHub}
+            loading={loading}
+            showCredentials={true}
+          />
+        ) : (
           <SignInForm
             onEmailLogin={onEmailLogin}
             onGoogleLogin={onGoogleLogin}
             onForgotPassword={onForgotPassword}
-            loading={loading}
-          />
-        ) : (
-          <SignUpForm
-            onSignUp={onSignUp}
             loading={loading}
           />
         )}
@@ -1379,20 +1380,46 @@ export default function App() {
   };
 
   // === createHub handler ===
-  // Step 2 of createHub flow. Requires user to be already signed in (Step 1 = handleSignUp).
+  // One-step: pre-check email existence → reject if exists, else signUp + signIn + createHub.
   // createHub Cloud Function takes only {hubName}; email is read from req.auth.token.email.
-  const handleCreateHub = async ({ hubName }) => {
+  const handleCreateHub = async ({ hubName, email, password }) => {
     setLoginLoading(true);
     setLoginError(null);
     try {
       const { auth, functions } = firebaseRefs;
-      if (!auth.currentUser) {
-        setLoginError('請先註冊或登入');
+      if (!email || !password) {
+        setLoginError('請輸入 Email 同密碼');
         return;
       }
+
+      // === Pre-check: is email already registered? ===
+      // Use Cloud Function checkEmailExists (Admin SDK getUserByEmail) — reliable for email/password users.
+      // fetchSignInMethodsForEmail doesn't reliably return signinMethods for email/password users.
+      const checkFn = httpsCallable(functions, 'checkEmailExists');
+      const checkRes = await checkFn({ email });
+      if (checkRes.data?.exists) {
+        setLoginError('此 Email 已註冊過，請用「登入」tab');
+        return;
+      }
+
+      // === Sign up new user (auto signs in) ===
+      try {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } catch (e) {
+        const code = e?.code || '';
+        // Race condition: another caller registered same email between our check and create.
+        if (code === 'auth/email-already-in-use') {
+          setLoginError('此 Email 已註冊過，請用「登入」tab');
+          return;
+        }
+        throw e;
+      }
+
+      // === Call createHub (user is now signed in) ===
       const createHubFn = httpsCallable(functions, 'createHub');
       const res = await createHubFn({ hubName });
       console.log('createHub success:', res.data);
+
       // Refresh ID token so custom claims are visible to onAuthStateChanged
       await auth.currentUser.getIdToken(true);
       // onAuthStateChanged will fire and set activeProfile; UI re-renders into app
@@ -1401,6 +1428,8 @@ export default function App() {
       const code = e?.code || '';
       const msg = e?.message || '';
       const codeMap = {
+        'auth/weak-password': '密碼太弱，最少 8 字',
+        'auth/invalid-email': 'Email 格式唔啱',
         'functions/unauthenticated/must-be-signed-in': '請先註冊或登入',
         'functions/already-exists/email-already-registered': '此 Email 已被其他 Hub 註冊',
         'functions/already-exists/hub-name-taken': '此 Hub 名已被使用，請改一個',
@@ -2235,7 +2264,6 @@ export default function App() {
         onEmailLogin={handleEmailLogin}
         onGoogleLogin={handleGoogleLogin}
         onForgotPassword={handleForgotPassword}
-        onSignUp={handleSignUp}
         onCreateHub={handleCreateHub}
         onSignOut={handleSignOutFromPreLogin}
         error={loginError}
