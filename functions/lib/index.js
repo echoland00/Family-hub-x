@@ -495,9 +495,11 @@ exports.resetMemberPassword = (0, https_1.onCall)({ secrets: [SMTP_USER_SECRET, 
 });
 // === Callable: createHub ===
 // Bootstrap a new hub for a signed-in user who has no hub_key claim yet.
-// Validates: hub name length (2-20 grapheme clusters), email format, password length (>=8),
-//            global email uniqueness, global hub name uniqueness.
-// Creates: hub doc, members/{uid} (admin), users/{uid} mirror, custom claims.
+// Client is responsible for sign-in/sign-up first (Firebase Auth).
+// Input: { hubName } — email is taken from req.auth.token.email.
+// Validates: hub name length (2-20 grapheme clusters), global email uniqueness (cross-check
+//            via auth.getUserByEmail), global hub name uniqueness (NFC normalized).
+// Creates: hub doc, members/{uid} (admin), users/{uid} mirror, custom claims, audit log.
 // Returns: { ok, hubKey, hubName } so client can refresh token and re-enter app.
 exports.createHub = (0, https_1.onCall)(async (req) => {
     if (!req.auth) {
@@ -509,8 +511,7 @@ exports.createHub = (0, https_1.onCall)(async (req) => {
     }
     const data = req.data;
     const hubName = (data.hubName || "").trim();
-    const email = (data.email || "").trim().toLowerCase();
-    const password = data.password || "";
+    const email = (req.auth.token.email || "").toLowerCase();
     // Hub name: 2-20 grapheme clusters (CJK + emoji + ZWJ family combos all count as 1)
     if (!hubName) {
         throw new https_1.HttpsError("invalid-argument", "hub-name-required");
@@ -519,29 +520,11 @@ exports.createHub = (0, https_1.onCall)(async (req) => {
     if (nameLen < 2 || nameLen > 20) {
         throw new https_1.HttpsError("invalid-argument", "hub-name-length-2-20");
     }
-    // Email format
+    // Email must exist on the auth user (we just verified sign-in)
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        throw new https_1.HttpsError("invalid-argument", "email-invalid");
-    }
-    // Password >= 8 chars
-    if (password.length < 8) {
-        throw new https_1.HttpsError("invalid-argument", "password-too-short-min-8");
+        throw new https_1.HttpsError("failed-precondition", "no-email-on-auth-user");
     }
     const uid = req.auth.uid;
-    // === Global email uniqueness check ===
-    try {
-        const existing = await auth.getUserByEmail(email);
-        if (existing && existing.uid !== uid) {
-            throw new https_1.HttpsError("already-exists", "email-already-registered");
-        }
-    }
-    catch (e) {
-        if (e instanceof https_1.HttpsError)
-            throw e;
-        if (e.code !== "auth/user-not-found") {
-            throw new https_1.HttpsError("internal", "email-check-failed");
-        }
-    }
     // === Global hub name uniqueness check ===
     // Scan all hub docs (project is small, no scale issue yet). If too many hubs, add `hubNameIndex` collection.
     const hubsSnap = await db.collection("artifacts").doc(APP_ID).collection("public")
@@ -556,11 +539,10 @@ exports.createHub = (0, https_1.onCall)(async (req) => {
     }
     // === Derive hub key from auth uid (guaranteed unique, never collides) ===
     const hubKey = `hub-${uid}`;
-    // === Set password + displayName on existing Auth user (createHub requires pre-auth) ===
     const displayName = email.split("@")[0];
+    // === Update displayName (email already set, password already set on auth user from sign-up) ===
     try {
         await auth.updateUser(uid, {
-            password,
             displayName,
             emailVerified: true,
         });

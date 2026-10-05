@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, updatePassword, updateProfile, signOut } from 'firebase/auth';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, updatePassword, updateProfile, signOut } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, onSnapshot, addDoc, updateDoc, deleteDoc, writeBatch, query, orderBy, where, arrayRemove, deleteField } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import * as XLSX from 'xlsx';
@@ -609,7 +609,7 @@ function CreateHubForm({ onCreateHub, loading, prefillEmail }) {
         {loading ? '建立中…' : '建立 Hub'}
       </button>
       <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-        建立後你會自動成為 admin。之後可以用「邀請成員」功能加入老婆同仔女。
+        第一次用會自動註冊個帳號。建立後你會自動成為 admin。之後可以用「邀請成員」功能加入老婆同仔女。
       </p>
     </form>
   );
@@ -1288,18 +1288,51 @@ export default function App() {
   };
 
   // === createHub handler ===
-  // Requires user to be already signed in (Google or email/password).
-  // Validates client-side, calls Cloud Function, refreshes ID token so onAuthStateChanged picks up new claims.
+  // One-step: try sign-in first (existing user), fallback to sign-up, then call createHub.
+  // Validates client-side, signs in/up, calls Cloud Function, refreshes ID token so onAuthStateChanged picks up new claims.
   const handleCreateHub = async ({ hubName, email, password }) => {
     setLoginLoading(true);
     setLoginError(null);
     try {
-      const createHubFn = httpsCallable(firebaseRefs.functions, 'createHub');
-      const res = await createHubFn({ hubName, email, password });
+      const { auth, functions } = firebaseRefs;
+      // === Step 1: sign in (existing user) or sign up (new user) ===
+      try {
+        await signInWithEmailAndPassword(auth, email, password);
+      } catch (e) {
+        const code = e?.code || '';
+        // Treat any "credential wrong" / "user not found" as "need to sign up"
+        if (
+          code === 'auth/invalid-credential' ||
+          code === 'auth/invalid-login-credentials' ||
+          code === 'auth/user-not-found' ||
+          code === 'auth/wrong-password'
+        ) {
+          try {
+            await createUserWithEmailAndPassword(auth, email, password);
+          } catch (e2) {
+            const c2 = e2?.code || '';
+            if (c2 === 'auth/email-already-in-use') {
+              throw { code: 'auth/email-password-mismatch', message: '此 Email 已註冊過但密碼唔啱，請用「登入」tab 或改另一個 Email' };
+            }
+            throw e2;
+          }
+        } else if (code === 'auth/email-already-in-use') {
+          throw { code: 'auth/email-password-mismatch', message: '此 Email 已註冊過，請用「登入」tab 或改另一個 Email' };
+        } else if (code === 'auth/too-many-requests') {
+          throw { code: 'auth/too-many-requests', message: '試太多次，遲啲再嚟' };
+        } else {
+          throw e;
+        }
+      }
+
+      // === Step 2: call createHub (user is now signed in) ===
+      const createHubFn = httpsCallable(functions, 'createHub');
+      const res = await createHubFn({ hubName });
       console.log('createHub success:', res.data);
-      // Refresh ID token so custom claims are visible to onAuthStateChanged
-      if (firebaseRefs.auth.currentUser) {
-        await firebaseRefs.auth.currentUser.getIdToken(true);
+
+      // === Step 3: refresh ID token so custom claims are visible to onAuthStateChanged ===
+      if (auth.currentUser) {
+        await auth.currentUser.getIdToken(true);
       }
       // onAuthStateChanged will fire and set activeProfile; UI re-renders into app
     } catch (e) {
@@ -1308,16 +1341,17 @@ export default function App() {
       const msg = e?.message || '';
       // Translate machine codes to user-friendly Chinese
       const codeMap = {
+        'auth/email-password-mismatch': '此 Email 已註冊過但密碼唔啱，請用「登入」tab 或改另一個 Email',
+        'auth/too-many-requests': '試太多次，遲啲再嚟',
+        'auth/weak-password': '密碼太弱',
+        'auth/invalid-email': 'Email 格式唔啱',
         'functions/already-exists/email-already-registered': '此 Email 已被其他 Hub 註冊',
         'functions/already-exists/hub-name-taken': '此 Hub 名已被使用，請改一個',
-        'functions/already-exists/email-already-in-this-hub': '你已是這個 Hub 的成員',
         'functions/already-exists/already-linked-to-hub': '你已經有 Hub 喇，唔需要再建立',
         'functions/invalid-argument/hub-name-required': '請輸入 Hub 名稱',
         'functions/invalid-argument/hub-name-length-2-20': 'Hub 名要 2-20 字元',
-        'functions/invalid-argument/email-invalid': 'Email 格式唔啱',
-        'functions/invalid-argument/password-too-short-min-8': '密碼最少 8 字',
       };
-      const friendly = codeMap[`${code}/${msg}`] || msg || '建立失敗，請重試';
+      const friendly = codeMap[code] || (msg || '建立失敗，請重試');
       setLoginError(friendly);
     } finally {
       setLoginLoading(false);
