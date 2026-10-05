@@ -553,44 +553,28 @@ function SignInForm({ onEmailLogin, onGoogleLogin, onForgotPassword, loading, hi
   );
 }
 
-function CreateHubForm({ onCreateHub, loading, prefillEmail }) {
-  const [hubName, setHubName] = useState('');
-  const [email, setEmail] = useState(prefillEmail || '');
+function SignUpForm({ onSignUp, loading }) {
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPwd, setShowPwd] = useState(false);
 
-  const nameLen = useMemo(() => graphemeLenClient(hubName), [hubName]);
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   const pwdValid = password.length >= 8;
-  const valid = nameLen >= 2 && nameLen <= 20 && emailValid && pwdValid;
+  const valid = emailValid && pwdValid;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!valid) return;
-    await onCreateHub({
-      hubName: hubName.trim(),
-      email: email.trim().toLowerCase(),
-      password,
-    });
+    await onSignUp(email.trim().toLowerCase(), password);
   };
 
   return (
     <form onSubmit={submit} className="space-y-3">
       <div>
-        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Hub 名稱</label>
-        <input type="text" value={hubName} onChange={e => setHubName(e.target.value)} disabled={loading}
-          placeholder="例如：Mofa 之家👨‍👩‍👧" maxLength={80} autoFocus
-          className="w-full mt-1 px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
-        <p className={`text-[10px] mt-1 ${nameLen > 20 ? 'text-red-500' : 'text-slate-400'}`}>
-          {nameLen}/20 字元 (中文同 emoji 組合當 1 字){hubName && nameLen < 2 ? ' · 最少 2 字' : ''}
-        </p>
-      </div>
-      <div>
         <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">你的 Email</label>
-        <input type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={loading || !!prefillEmail}
-          placeholder="you@example.com" required autoComplete="email"
+        <input type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={loading}
+          placeholder="you@example.com" required autoComplete="email" autoFocus
           className="w-full mt-1 px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
-        {prefillEmail && <p className="text-[10px] text-slate-400 mt-1">已用登入 Email</p>}
       </div>
       <div>
         <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">密碼 (最少 8 字)</label>
@@ -606,17 +590,89 @@ function CreateHubForm({ onCreateHub, loading, prefillEmail }) {
       </div>
       <button type="submit" disabled={!valid || loading}
         className="w-full bg-amber-500 text-white py-3 rounded-xl font-bold hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50 transition-all shadow-md">
-        {loading ? '建立中…' : '建立 Hub'}
+        {loading ? '建立帳號中…' : '建立帳號'}
       </button>
       <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
-        第一次用會自動註冊個帳號。建立後你會自動成為 admin。之後可以用「邀請成員」功能加入老婆同仔女。
+        註冊成功後自動登入，下一步可以建立你嘅 Hub。
       </p>
     </form>
   );
 }
 
-function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, onCreateHub, onSignOut, error, loading, defaultTab }) {
-  const [tab, setTab] = useState(defaultTab || 'signin');
+function CreateHubForm({ onCreateHub, loading, showCredentials = false, prefillEmail = '' }) {
+  const [hubName, setHubName] = useState('');
+  const [email, setEmail] = useState(prefillEmail);
+  const [password, setPassword] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+
+  const nameLen = useMemo(() => graphemeLenClient(hubName), [hubName]);
+  const nameValid = nameLen >= 2 && nameLen <= 20;
+  const emailValid = !showCredentials || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const pwdValid = !showCredentials || password.length >= 8;
+  const valid = nameValid && emailValid && pwdValid;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!valid) return;
+    const payload = { hubName: hubName.trim() };
+    if (showCredentials) {
+      payload.email = email.trim().toLowerCase();
+      payload.password = password;
+    }
+    await onCreateHub(payload);
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-3">
+      <div>
+        <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Hub 名稱</label>
+        <input type="text" value={hubName} onChange={e => setHubName(e.target.value)} disabled={loading}
+          placeholder="例如：Mofa 之家👨‍👩‍👧" maxLength={80} autoFocus
+          className="w-full mt-1 px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
+        <p className={`text-[10px] mt-1 ${!nameValid ? 'text-red-500' : 'text-slate-400'}`}>
+          {nameLen}/20 字元 (中文同 emoji 組合當 1 字){hubName && nameLen < 2 ? ' · 最少 2 字' : ''}
+        </p>
+      </div>
+      {showCredentials && (
+        <>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">你的 Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} disabled={loading || !!prefillEmail}
+              placeholder="you@example.com" required autoComplete="email"
+              className="w-full mt-1 px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
+            {prefillEmail && <p className="text-[10px] text-slate-400 mt-1">已用登入 Email</p>}
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">密碼 (最少 8 字)</label>
+            <div className="relative">
+              <input type={showPwd ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)} disabled={loading}
+                placeholder="••••••••" required minLength={8} autoComplete="new-password"
+                className="w-full mt-1 px-4 py-3 pr-12 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-50" />
+              <button type="button" onClick={() => setShowPwd(!showPwd)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs font-bold">
+                {showPwd ? 'HIDE' : 'SHOW'}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      <button type="submit" disabled={!valid || loading}
+        className="w-full bg-amber-500 text-white py-3 rounded-xl font-bold hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50 transition-all shadow-md">
+        {loading ? '建立中…' : '建立 Hub'}
+      </button>
+      <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+        建立後你會自動成為 admin。之後可以用「邀請成員」功能加入老婆同仔女。
+      </p>
+    </form>
+  );
+}
+
+function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, onSignUp, onCreateHub, onSignOut, error, loading, defaultTab }) {
+  // Two distinct states:
+  //   A) !user → tabs [登入] / [註冊帳號]
+  //   B) user && !activeProfile → only "建立新 Hub" form (signed in but no hub claim)
+  const [tab, setTab] = useState(defaultTab || (user ? 'create' : 'signin'));
+  const isSignedInNoHub = !!user;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50 flex items-center justify-center p-4 font-sans">
@@ -627,35 +683,40 @@ function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, o
           <p className="text-xs text-slate-500 mt-1 uppercase tracking-widest">家庭共享日曆</p>
         </div>
 
-        {user && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 text-xs text-amber-800 flex items-center justify-between gap-2">
-            <span className="truncate">已登入為 <strong>{user.email}</strong> · 未連結 Hub</span>
+        {isSignedInNoHub && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 text-amber-800 flex items-center justify-between gap-2">
+            <span className="text-xs truncate">已登入為 <strong>{user.email}</strong> · 未連結 Hub</span>
             <button onClick={onSignOut} disabled={loading}
-              className="text-amber-700 hover:underline font-bold shrink-0 disabled:opacity-50">
+              className="text-amber-700 hover:underline font-bold shrink-0 text-xs disabled:opacity-50">
               登出
             </button>
           </div>
         )}
 
-        <div className="flex gap-1 p-1 bg-slate-100 rounded-xl mb-6">
-          <button
-            onClick={() => setTab('signin')}
-            disabled={!!user /* if already signed in, only Create tab makes sense */}
-            className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
-              tab === 'signin' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            } ${user ? 'opacity-40 cursor-not-allowed' : ''}`}
-          >
-            登入
-          </button>
-          <button
-            onClick={() => setTab('create')}
-            className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
-              tab === 'create' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            建立新 Hub
-          </button>
-        </div>
+        {!isSignedInNoHub && (
+          <div className="flex gap-1 p-1 bg-slate-100 rounded-xl mb-6">
+            <button
+              onClick={() => setTab('signin')}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
+                tab === 'signin' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              登入
+            </button>
+            <button
+              onClick={() => setTab('signup')}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
+                tab === 'signup' ? 'bg-white text-amber-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              註冊帳號
+            </button>
+          </div>
+        )}
+
+        {isSignedInNoHub && (
+          <h2 className="text-center text-sm font-bold text-slate-700 mb-4">建立你嘅 Hub</h2>
+        )}
 
         {error && (
           <div className="bg-red-50 text-red-700 p-3 rounded-xl mb-4 text-sm border border-red-100">
@@ -663,19 +724,24 @@ function PreLoginScreen({ user, onEmailLogin, onGoogleLogin, onForgotPassword, o
           </div>
         )}
 
-        {tab === 'signin' ? (
+        {isSignedInNoHub ? (
+          <CreateHubForm
+            onCreateHub={onCreateHub}
+            loading={loading}
+            showCredentials={false}
+            prefillEmail={user.email}
+          />
+        ) : tab === 'signin' ? (
           <SignInForm
             onEmailLogin={onEmailLogin}
             onGoogleLogin={onGoogleLogin}
             onForgotPassword={onForgotPassword}
             loading={loading}
-            hideGoogle={!!user}
           />
         ) : (
-          <CreateHubForm
-            onCreateHub={onCreateHub}
+          <SignUpForm
+            onSignUp={onSignUp}
             loading={loading}
-            prefillEmail={user?.email || ''}
           />
         )}
 
@@ -1287,71 +1353,62 @@ export default function App() {
     }
   };
 
+  // === signUp handler ===
+  // Step 1 of createHub flow. Creates Firebase Auth user; auto signs in.
+  // After this completes, onAuthStateChanged fires; PreLoginScreen detects no hub_key
+  // claim and re-renders to show "Create new Hub" form.
+  const handleSignUp = async (email, password) => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      await createUserWithEmailAndPassword(firebaseRefs.auth, email, password);
+      // onAuthStateChanged will fire; if no hub_key claim, PreLoginScreen shows CreateHubForm
+    } catch (e) {
+      console.error('signUp failed:', e);
+      const code = e?.code || '';
+      const codeMap = {
+        'auth/email-already-in-use': '此 Email 已註冊過，請用「登入」tab',
+        'auth/invalid-email': 'Email 格式唔啱',
+        'auth/weak-password': '密碼太弱，最少 8 字',
+        'auth/operation-not-allowed': '電郵/密碼登入未啟用，請聯絡 admin',
+      };
+      setLoginError(codeMap[code] || (e?.message || '註冊失敗，請重試'));
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   // === createHub handler ===
-  // One-step: try sign-in first (existing user), fallback to sign-up, then call createHub.
-  // Validates client-side, signs in/up, calls Cloud Function, refreshes ID token so onAuthStateChanged picks up new claims.
-  const handleCreateHub = async ({ hubName, email, password }) => {
+  // Step 2 of createHub flow. Requires user to be already signed in (Step 1 = handleSignUp).
+  // createHub Cloud Function takes only {hubName}; email is read from req.auth.token.email.
+  const handleCreateHub = async ({ hubName }) => {
     setLoginLoading(true);
     setLoginError(null);
     try {
       const { auth, functions } = firebaseRefs;
-      // === Step 1: sign in (existing user) or sign up (new user) ===
-      try {
-        await signInWithEmailAndPassword(auth, email, password);
-      } catch (e) {
-        const code = e?.code || '';
-        // Treat any "credential wrong" / "user not found" as "need to sign up"
-        if (
-          code === 'auth/invalid-credential' ||
-          code === 'auth/invalid-login-credentials' ||
-          code === 'auth/user-not-found' ||
-          code === 'auth/wrong-password'
-        ) {
-          try {
-            await createUserWithEmailAndPassword(auth, email, password);
-          } catch (e2) {
-            const c2 = e2?.code || '';
-            if (c2 === 'auth/email-already-in-use') {
-              throw { code: 'auth/email-password-mismatch', message: '此 Email 已註冊過但密碼唔啱，請用「登入」tab 或改另一個 Email' };
-            }
-            throw e2;
-          }
-        } else if (code === 'auth/email-already-in-use') {
-          throw { code: 'auth/email-password-mismatch', message: '此 Email 已註冊過，請用「登入」tab 或改另一個 Email' };
-        } else if (code === 'auth/too-many-requests') {
-          throw { code: 'auth/too-many-requests', message: '試太多次，遲啲再嚟' };
-        } else {
-          throw e;
-        }
+      if (!auth.currentUser) {
+        setLoginError('請先註冊或登入');
+        return;
       }
-
-      // === Step 2: call createHub (user is now signed in) ===
       const createHubFn = httpsCallable(functions, 'createHub');
       const res = await createHubFn({ hubName });
       console.log('createHub success:', res.data);
-
-      // === Step 3: refresh ID token so custom claims are visible to onAuthStateChanged ===
-      if (auth.currentUser) {
-        await auth.currentUser.getIdToken(true);
-      }
+      // Refresh ID token so custom claims are visible to onAuthStateChanged
+      await auth.currentUser.getIdToken(true);
       // onAuthStateChanged will fire and set activeProfile; UI re-renders into app
     } catch (e) {
       console.error('createHub failed:', e);
       const code = e?.code || '';
       const msg = e?.message || '';
-      // Translate machine codes to user-friendly Chinese
       const codeMap = {
-        'auth/email-password-mismatch': '此 Email 已註冊過但密碼唔啱，請用「登入」tab 或改另一個 Email',
-        'auth/too-many-requests': '試太多次，遲啲再嚟',
-        'auth/weak-password': '密碼太弱',
-        'auth/invalid-email': 'Email 格式唔啱',
+        'functions/unauthenticated/must-be-signed-in': '請先註冊或登入',
         'functions/already-exists/email-already-registered': '此 Email 已被其他 Hub 註冊',
         'functions/already-exists/hub-name-taken': '此 Hub 名已被使用，請改一個',
         'functions/already-exists/already-linked-to-hub': '你已經有 Hub 喇，唔需要再建立',
         'functions/invalid-argument/hub-name-required': '請輸入 Hub 名稱',
         'functions/invalid-argument/hub-name-length-2-20': 'Hub 名要 2-20 字元',
       };
-      const friendly = codeMap[code] || (msg || '建立失敗，請重試');
+      const friendly = codeMap[`${code}/${msg}`] || msg || '建立失敗，請重試';
       setLoginError(friendly);
     } finally {
       setLoginLoading(false);
@@ -2178,6 +2235,7 @@ export default function App() {
         onEmailLogin={handleEmailLogin}
         onGoogleLogin={handleGoogleLogin}
         onForgotPassword={handleForgotPassword}
+        onSignUp={handleSignUp}
         onCreateHub={handleCreateHub}
         onSignOut={handleSignOutFromPreLogin}
         error={loginError}
