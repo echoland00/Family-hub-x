@@ -1429,42 +1429,45 @@ export default function App() {
   };
 
   // === createHub handler ===
-  // One-step: pre-check email existence → reject if exists, else signUp + signIn + createHub.
-  // createHub Cloud Function takes only {hubName}; email is read from req.auth.token.email.
+  // Two paths based on whether user is already signed in:
+  //  A) Signed in (e.g. just signed up via SignUpForm, or hit PreLoginScreen from signed-in-no-hub state)
+  //     → just call createHub({hubName}); Cloud Function reads email from req.auth.token.email
+  //  B) Not signed in (PreLoginScreen「建立新 Hub」tab with showCredentials=true form)
+  //     → pre-check email + sign up new user + createHub
   const handleCreateHub = async ({ hubName, email, password }) => {
     setLoginLoading(true);
     setLoginError(null);
     try {
       const { auth, functions } = firebaseRefs;
-      if (!email || !password) {
-        setLoginError('請輸入 Email 同密碼');
-        return;
-      }
+      const isSignedIn = !!auth.currentUser;
 
-      // === Pre-check: is email already registered? ===
-      // Use Cloud Function checkEmailExists (Admin SDK getUserByEmail) — reliable for email/password users.
-      // fetchSignInMethodsForEmail doesn't reliably return signinMethods for email/password users.
-      const checkFn = httpsCallable(functions, 'checkEmailExists');
-      const checkRes = await checkFn({ email });
-      if (checkRes.data?.exists) {
-        setLoginError('此 Email 已註冊過，請用「登入」tab');
-        return;
-      }
-
-      // === Sign up new user (auto signs in) ===
-      try {
-        await createUserWithEmailAndPassword(auth, email, password);
-      } catch (e) {
-        const code = e?.code || '';
-        // Race condition: another caller registered same email between our check and create.
-        if (code === 'auth/email-already-in-use') {
+      // === Path B: not signed in — need email + password ===
+      if (!isSignedIn) {
+        if (!email || !password) {
+          setLoginError('請輸入 Email 同密碼');
+          return;
+        }
+        // Pre-check email existence
+        const checkFn = httpsCallable(functions, 'checkEmailExists');
+        const checkRes = await checkFn({ email });
+        if (checkRes.data?.exists) {
           setLoginError('此 Email 已註冊過，請用「登入」tab');
           return;
         }
-        throw e;
+        // Sign up (auto signs in)
+        try {
+          await createUserWithEmailAndPassword(auth, email, password);
+        } catch (e) {
+          const code = e?.code || '';
+          if (code === 'auth/email-already-in-use') {
+            setLoginError('此 Email 已註冊過，請用「登入」tab');
+            return;
+          }
+          throw e;
+        }
       }
 
-      // === Call createHub (user is now signed in) ===
+      // === Path A & B: call createHub (user is now signed in) ===
       const createHubFn = httpsCallable(functions, 'createHub');
       const res = await createHubFn({ hubName });
       console.log('createHub success:', res.data);
