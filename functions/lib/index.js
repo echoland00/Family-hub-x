@@ -19,7 +19,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resetMemberPassword = exports.changeRole = exports.removeMember = exports.listKidsForInvite = exports.listMembers = exports.inviteChild = exports.inviteMember = void 0;
+exports.createHub = exports.resetMemberPassword = exports.changeRole = exports.removeMember = exports.listKidsForInvite = exports.listMembers = exports.inviteChild = exports.inviteMember = void 0;
 const https_1 = require("firebase-functions/v2/https");
 const app_1 = require("firebase-admin/app");
 const auth_1 = require("firebase-admin/auth");
@@ -138,6 +138,23 @@ function requireAdmin(req) {
     }
     return { uid: req.auth.uid, hubKey: claims.hub_key };
 }
+// === Helpers for createHub (grapheme-aware hub name validation) ===
+function graphemeLength(s) {
+    // Use Intl.Segmenter if available (Node 16+, all modern browsers)
+    const Seg = Intl.Segmenter;
+    if (Seg) {
+        try {
+            return Array.from(new Seg("zh", { granularity: "grapheme" }).segment(s)).length;
+        }
+        catch {
+            /* fall through */
+        }
+    }
+    return [...s].length; // fallback: code points (Array.from iterates by code point)
+}
+function normalizeHubName(s) {
+    return s.normalize("NFC").trim().toLowerCase();
+}
 async function audit(hubKey, actor, action, target, details) {
     await hubCol(hubKey, "audit").add({
         actor, action, target,
@@ -162,6 +179,27 @@ exports.inviteMember = (0, https_1.onCall)({ secrets: [SMTP_USER_SECRET, SMTP_PA
         throw new https_1.HttpsError("invalid-argument", "role must be admin or member");
     }
     const caps = role === "admin" ? ADMIN_CAPS : MEMBER_CAPS;
+    // === Global email uniqueness check (cross-hub) ===
+    try {
+        const existingByEmail = await auth.getUserByEmail(targetEmail);
+        if (existingByEmail) {
+            const existingClaims = existingByEmail.customClaims || {};
+            if (existingClaims.hub_key && existingClaims.hub_key !== hubKey) {
+                throw new https_1.HttpsError("already-exists", "email-already-registered-in-other-hub");
+            }
+            if (existingClaims.hub_key === hubKey) {
+                // Same hub — already a member
+                throw new https_1.HttpsError("already-exists", "email-already-in-this-hub");
+            }
+        }
+    }
+    catch (e) {
+        if (e instanceof https_1.HttpsError)
+            throw e;
+        if (e.code !== "auth/user-not-found") {
+            throw e;
+        }
+    }
     let user;
     let created = false;
     try {
@@ -454,5 +492,126 @@ exports.resetMemberPassword = (0, https_1.onCall)({ secrets: [SMTP_USER_SECRET, 
         setup_link: resetLink, email_sent: emailSent,
         email_error: emailError,
     };
+});
+// === Callable: createHub ===
+// Bootstrap a new hub for a signed-in user who has no hub_key claim yet.
+// Validates: hub name length (2-20 grapheme clusters), email format, password length (>=8),
+//            global email uniqueness, global hub name uniqueness.
+// Creates: hub doc, members/{uid} (admin), users/{uid} mirror, custom claims.
+// Returns: { ok, hubKey, hubName } so client can refresh token and re-enter app.
+exports.createHub = (0, https_1.onCall)(async (req) => {
+    if (!req.auth) {
+        throw new https_1.HttpsError("unauthenticated", "must-be-signed-in");
+    }
+    const claims = req.auth.token || {};
+    if (claims.hub_key) {
+        throw new https_1.HttpsError("already-exists", "already-linked-to-hub");
+    }
+    const data = req.data;
+    const hubName = (data.hubName || "").trim();
+    const email = (data.email || "").trim().toLowerCase();
+    const password = data.password || "";
+    // Hub name: 2-20 grapheme clusters (CJK + emoji + ZWJ family combos all count as 1)
+    if (!hubName) {
+        throw new https_1.HttpsError("invalid-argument", "hub-name-required");
+    }
+    const nameLen = graphemeLength(hubName);
+    if (nameLen < 2 || nameLen > 20) {
+        throw new https_1.HttpsError("invalid-argument", "hub-name-length-2-20");
+    }
+    // Email format
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new https_1.HttpsError("invalid-argument", "email-invalid");
+    }
+    // Password >= 8 chars
+    if (password.length < 8) {
+        throw new https_1.HttpsError("invalid-argument", "password-too-short-min-8");
+    }
+    const uid = req.auth.uid;
+    // === Global email uniqueness check ===
+    try {
+        const existing = await auth.getUserByEmail(email);
+        if (existing && existing.uid !== uid) {
+            throw new https_1.HttpsError("already-exists", "email-already-registered");
+        }
+    }
+    catch (e) {
+        if (e instanceof https_1.HttpsError)
+            throw e;
+        if (e.code !== "auth/user-not-found") {
+            throw new https_1.HttpsError("internal", "email-check-failed");
+        }
+    }
+    // === Global hub name uniqueness check ===
+    // Scan all hub docs (project is small, no scale issue yet). If too many hubs, add `hubNameIndex` collection.
+    const hubsSnap = await db.collection("artifacts").doc(APP_ID).collection("public")
+        .doc("data").collection("hubs").get();
+    const normalized = normalizeHubName(hubName);
+    for (const docSnap of hubsSnap.docs) {
+        const existingName = ((docSnap.data()?.profile?.name) || "")
+            .normalize("NFC").trim().toLowerCase();
+        if (existingName === normalized) {
+            throw new https_1.HttpsError("already-exists", "hub-name-taken");
+        }
+    }
+    // === Derive hub key from auth uid (guaranteed unique, never collides) ===
+    const hubKey = `hub-${uid}`;
+    // === Set password + displayName on existing Auth user (createHub requires pre-auth) ===
+    const displayName = email.split("@")[0];
+    try {
+        await auth.updateUser(uid, {
+            password,
+            displayName,
+            emailVerified: true,
+        });
+    }
+    catch (e) {
+        throw new https_1.HttpsError("internal", "auth-update-failed: " + (e.message || "unknown"));
+    }
+    const hubRef = db.collection("artifacts").doc(APP_ID).collection("public")
+        .doc("data").collection("hubs").doc(hubKey);
+    // === Create hub root doc ===
+    await hubRef.set({
+        profile: {
+            name: hubName,
+            created_at: firestore_1.FieldValue.serverTimestamp(),
+        },
+        created_by: uid,
+        created_at: firestore_1.FieldValue.serverTimestamp(),
+    });
+    // === Add self to members/{uid} as admin ===
+    await hubRef.collection("members").doc(uid).set({
+        email,
+        display_name: displayName,
+        role: "admin",
+        status: "active",
+        auth_methods: ["password"],
+        primary_method: "password",
+        has_password: true,
+        needs_password_setup: false,
+        capabilities: ADMIN_CAPS,
+        created_at: firestore_1.FieldValue.serverTimestamp(),
+        created_by: uid,
+    });
+    // === Mirror to top-level users/{uid} ===
+    await db.collection("users").doc(uid).set({
+        email,
+        display_name: displayName,
+        hub_key: hubKey,
+        role: "admin",
+        status: "active",
+        last_active_at: firestore_1.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    // === Custom claims ===
+    await auth.setCustomUserClaims(uid, {
+        hub_key: hubKey, role: "admin", status: "active",
+    });
+    // Audit log
+    await hubRef.collection("audit").add({
+        actor: uid, action: "hub_created", target: hubKey,
+        details: { hub_name: hubName },
+        at: firestore_1.FieldValue.serverTimestamp(),
+    });
+    return { ok: true, hubKey, hubName };
 });
 //# sourceMappingURL=index.js.map

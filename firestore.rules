@@ -40,6 +40,12 @@ service cloud.firestore {
         ];
     }
 
+    // === Hub root doc (Cloud Function createHub writes; members read) ===
+    match /artifacts/{appId}/public/data/hubs/{hubKey} {
+      allow read: if hasHubAccess(hubKey);
+      allow write: if false; // Cloud Functions (Admin SDK) only
+    }
+
     // === Members (admin writes, self-reads) ===
     match /artifacts/{appId}/public/data/hubs/{hubKey}/members/{uid} {
       allow read: if hasHubAccess(hubKey)
