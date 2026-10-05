@@ -444,7 +444,7 @@ export const removeMember = onCall(async (req) => {
     disabled_by: callerUid,
   });
   try {
-    await auth.setCustomUserClaims(targetUid, { hub_key: hubKey, status: "disabled" });
+    await auth.setCustomUserClaims(targetUid, { status: "disabled" });
   } catch (e) {
     // user might not exist
   }

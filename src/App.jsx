@@ -998,6 +998,54 @@ function InviteResultModal({ result, onClose }) {
   );
 }
 
+// ============================================================
+// RemoveMemberModal — confirm before removing a member from hub
+// ============================================================
+function RemoveMemberModal({ member, onConfirm, onCancel }) {
+  return (
+    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex items-end sm:items-center justify-center p-3">
+      <div className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden">
+        <div className="p-6 border-b flex justify-between items-center bg-gradient-to-r from-red-50 to-rose-50">
+          <div className="flex items-center gap-2">
+            <Trash2 size={18} className="text-red-600" />
+            <h2 className="text-sm font-bold text-slate-900 uppercase">Remove Member</h2>
+          </div>
+          <button onClick={onCancel} className="p-2 text-slate-300 bg-white rounded-xl"><X size={18} /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-800 leading-relaxed">
+            <p className="font-bold mb-1">⚠ 呢個動作會：</p>
+            <ul className="list-disc list-inside space-y-0.5">
+              <li>清除該成員嘅 <strong>Hub 連結</strong> (custom claims)</li>
+              <li>將該成員狀態設為 <strong>disabled</strong></li>
+              <li>之後該用戶可以重新註冊 <strong>同一個 Email</strong> 開新 Hub</li>
+              <li>Hub 內嘅資料 (kids/meals/groceries) <strong>唔會刪除</strong></li>
+            </ul>
+          </div>
+          <div className="bg-slate-50 p-3 rounded-xl text-xs">
+            <p className="font-bold text-slate-800">{member.display_name}</p>
+            <p className="text-slate-500">{member.email} · Role: {member.role}</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={onCancel}
+              className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold uppercase active:scale-95"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onConfirm}
+              className="flex-1 py-3 bg-red-600 text-white rounded-xl text-xs font-bold uppercase active:scale-95 shadow-md"
+            >
+              Remove from Hub
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [isConfigReady, setIsConfigReady] = useState(false);
   const [user, setUser] = useState(null);
@@ -1053,6 +1101,7 @@ export default function App() {
   const [inviteAdultOpen, setInviteAdultOpen] = useState(false);
   const [inviteChildOpen, setInviteChildOpen] = useState(false);
   const [inviteResult, setInviteResult] = useState(null);  // { setup_link, email_sent, email_error, ... }
+  const [removeConfirm, setRemoveConfirm] = useState(null);  // { uid, display_name, email }
 
   // ===== School module state =====
   const [kids, setKids] = useState([]);
@@ -1486,6 +1535,31 @@ export default function App() {
         return { ok: false, error: '請先 logout 再 login，然後立即改密碼' };
       }
       return { ok: false, error: e?.message || '改密碼失敗' };
+    }
+  };
+
+  // === Remove member (admin only) ===
+  // Sets member status='disabled' AND clears custom claims (hub_key) so they can sign up + create new hub.
+  const handleRemoveMember = async (member) => {
+    if (!member?.uid) return;
+    setLoginLoading(true);
+    try {
+      const fn = httpsCallable(firebaseRefs.functions, 'removeMember');
+      await fn({ uid: member.uid });
+      setRemoveConfirm(null);
+      showToast(`${member.display_name || member.email} 已從 Hub 移除`, 'success');
+    } catch (e) {
+      console.error('removeMember failed:', e);
+      const code = e?.code || '';
+      const msg = e?.message || '';
+      const codeMap = {
+        'functions/permission-denied/Admin only': '只有 admin 可以移除成員',
+        'functions/failed-precondition/Cannot remove the last active admin': '唔可以移除最後一個 Admin',
+        'functions/failed-precondition/Cannot remove yourself': '唔可以移除自己 (請其他 admin 操作)',
+      };
+      showToast(codeMap[code] || msg || '移除失敗', 'error');
+    } finally {
+      setLoginLoading(false);
     }
   };
 
@@ -4047,6 +4121,14 @@ export default function App() {
                         >
                           Reset
                         </button>
+                        <button
+                          onClick={() => setRemoveConfirm({ uid: m.uid, display_name: m.display_name, email: m.email, role: m.role })}
+                          disabled={m.uid === user?.uid}
+                          className="bg-white border border-red-200 px-2 py-1 rounded-lg text-[9px] font-bold uppercase text-red-600 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed hover:bg-red-50"
+                          title={m.uid === user?.uid ? '唔可以移除自己' : '從 Hub 移除此成員 (可重新註冊)'}
+                        >
+                          Remove
+                        </button>
                       </div>
                     </div>
                   ))}
@@ -4055,9 +4137,18 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-[9px] text-slate-400 mt-3 leading-relaxed">
-                  💡 Invite actions generate CLI commands. Open WSL terminal & paste to execute.
+                  💡 Remove 會清除該成員嘅 Hub 連結。之後該用戶可以重新註冊 + 開新 Hub。
                 </p>
               </div>
+            )}
+
+            {/* ─── Remove Member Confirm ─────────────────────────────────── */}
+            {removeConfirm && (
+              <RemoveMemberModal
+                member={removeConfirm}
+                onConfirm={() => handleRemoveMember(removeConfirm)}
+                onCancel={() => setRemoveConfirm(null)}
+              />
             )}
 
             {/* ─── Security (Change Password) ────────────────────────────────── */}
