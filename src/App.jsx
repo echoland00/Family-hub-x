@@ -1468,13 +1468,33 @@ export default function App() {
       }
 
       // === Path A & B: call createHub (user is now signed in) ===
+      // Pre-refresh token so server sees latest claims (defensive against stale tokens)
+      try {
+        await auth.currentUser.getIdToken(true);
+      } catch (e) {
+        console.warn('Token pre-refresh failed (continuing):', e);
+      }
+
       const createHubFn = httpsCallable(functions, 'createHub');
       const res = await createHubFn({ hubName });
       console.log('createHub success:', res.data);
 
-      // Refresh ID token so custom claims are visible to onAuthStateChanged
-      await auth.currentUser.getIdToken(true);
-      // onAuthStateChanged will fire and set activeProfile; UI re-renders into app
+      // Direct UI transition: set activeProfile from response.
+      // Don't rely on onAuthStateChanged — it does NOT fire when only the token
+      // updates (same user, new claims), so the UI would stay stuck on PreLoginScreen.
+      setActiveProfile({
+        uid: auth.currentUser.uid,
+        email: auth.currentUser.email,
+        hubKey: res.data.hubKey,
+        role: 'admin',
+        name: auth.currentUser.displayName || res.data.hubName,
+      });
+      setLoginError(null);
+
+      // Background: refresh ID token so future requests + onAuthStateChanged see new claims
+      auth.currentUser.getIdToken(true).catch(err =>
+        console.warn('Token post-refresh failed:', err)
+      );
     } catch (e) {
       console.error('createHub failed:', e);
       const code = e?.code || '';
@@ -1490,7 +1510,33 @@ export default function App() {
         'functions/invalid-argument/hub-name-length-2-20': 'Hub 名要 2-20 字元',
       };
       const friendly = codeMap[`${code}/${msg}`] || msg || '建立失敗，請重試';
-      setLoginError(friendly);
+
+      // Special case: if server says "already-linked-to-hub", the hub was created
+      // (just now or in a parallel attempt). Force-refresh token and try to enter
+      // the hub directly instead of showing the "useless" error banner.
+      if (`${code}/${msg}` === 'functions/already-exists/already-linked-to-hub') {
+        try {
+          const result = await auth.currentUser.getIdTokenResult(true);
+          const c = result.claims || {};
+          if (c.hub_key && c.role === 'admin' && c.status === 'active') {
+            setActiveProfile({
+              uid: auth.currentUser.uid,
+              email: auth.currentUser.email,
+              hubKey: c.hub_key,
+              role: c.role,
+              name: auth.currentUser.displayName || c.hub_key,
+            });
+            setLoginError(null);
+            return; // skip the error display
+          }
+        } catch (refreshErr) {
+          console.error('Token refresh after already-linked failed:', refreshErr);
+        }
+        // Fallback: hub exists but not on this device's session
+        setLoginError('Hub 已建立（請重新整理頁面或重新登入）');
+      } else {
+        setLoginError(friendly);
+      }
     } finally {
       setLoginLoading(false);
     }
