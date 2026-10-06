@@ -1098,6 +1098,9 @@ export default function App() {
   // Members UI state (admin only)
   const [members, setMembers] = useState([]);
   const [membersKids, setMembersKids] = useState([]);
+  // Filtered list: only active members. Disabled/removed members are hidden from UI
+  // (data preserved in members subcollection for audit).
+  const activeMembers = members.filter(m => m.status !== 'disabled');
   const [inviteAdultOpen, setInviteAdultOpen] = useState(false);
   const [inviteChildOpen, setInviteChildOpen] = useState(false);
   const [inviteResult, setInviteResult] = useState(null);  // { setup_link, email_sent, email_error, ... }
@@ -4102,7 +4105,7 @@ export default function App() {
               <div className="bg-white rounded-[2rem] p-6 shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-xs font-bold text-indigo-600 uppercase flex items-center gap-2">
-                    <Users2 size={14} /> Members ({members.length})
+                    <Users2 size={14} /> Members ({activeMembers.length})
                   </h3>
                   <div className="flex gap-1.5">
                     <button
@@ -4120,7 +4123,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="space-y-2 max-h-96 overflow-y-auto">
-                  {members.map(m => (
+                  {activeMembers.map(m => (
                     <div key={m.uid} className="bg-slate-50 p-3 rounded-xl">
                       <div className="flex items-start justify-between">
                         <div className="flex-1 min-w-0">
@@ -4133,11 +4136,6 @@ export default function App() {
                             }`}>
                               {m.role}
                             </span>
-                            {m.status === 'disabled' && (
-                              <span className="text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-red-100 text-red-600">
-                                disabled
-                              </span>
-                            )}
                           </div>
                           <p className="text-[10px] text-slate-400 truncate">
                             {m.email || m.synthetic_email}
@@ -4181,7 +4179,7 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                  {members.length === 0 && (
+                  {activeMembers.length === 0 && (
                     <p className="text-[10px] text-slate-400 text-center py-4">No members yet</p>
                   )}
                 </div>
