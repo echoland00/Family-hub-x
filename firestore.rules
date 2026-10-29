@@ -104,6 +104,18 @@ service cloud.firestore {
       allow write: if hasHubAccess(hubKey) && isAdmin(hubKey);
     }
 
+    // === Library: dishes + categories (admin only writes) ===
+    // Was missing since 9/23 rules lockdown — fell through to default deny for all non-bypass users.
+    // Symptom: Library shows empty, + button silent no-op (permission-denied).
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/dishes/{doc=**} {
+      allow read: if hasHubAccess(hubKey);
+      allow write: if hasHubAccess(hubKey) && isAdmin(hubKey);
+    }
+    match /artifacts/{appId}/public/data/hubs/{hubKey}/categories/{doc=**} {
+      allow read: if hasHubAccess(hubKey);
+      allow write: if hasHubAccess(hubKey) && isAdmin(hubKey);
+    }
+
     // === Pins (legacy) ===
     match /artifacts/{appId}/public/data/pins/{pinId} {
       allow read: if isSignedIn();

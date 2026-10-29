@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, updatePassword, updateProfile, signOut } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, getDoc, getDocs, onSnapshot, addDoc, updateDoc, deleteDoc, writeBatch, query, orderBy, where, arrayRemove, deleteField } from 'firebase/firestore';
@@ -1229,8 +1229,14 @@ export default function App() {
       onSnapshot(doc(db, ...root), (s) => setHubProfile(s.exists() ? s.data() : null)),
       onSnapshot(collection(db, ...root, 'meals'), (s) => setMeals(s.docs.map(d => ({ id: d.id, ...d.data() })))),
       onSnapshot(collection(db, ...root, 'groceries'), (s) => setGroceries(s.docs.map(d => ({ id: d.id, ...d.data() })))),
-      onSnapshot(collection(db, ...root, 'dishes'), (s) => setDishes(s.docs.map(d => ({ id: d.id, ...d.data() })))),
-      onSnapshot(collection(db, ...root, 'categories'), (s) => setCategories(s.docs.map(d => ({ id: d.id, ...d.data() })))),
+      onSnapshot(collection(db, ...root, 'dishes'),
+        (s) => { console.log('[dishes snapshot]', s.docs.length, 'docs'); setDishes(s.docs.map(d => ({ id: d.id, ...d.data() }))); },
+        (err) => { console.error('[dishes snapshot ERR]', err.code, err.message); }
+      ),
+      onSnapshot(collection(db, ...root, 'categories'),
+        (s) => { console.log('[categories snapshot]', s.docs.length, 'docs'); setCategories(s.docs.map(d => ({ id: d.id, ...d.data() }))); },
+        (err) => { console.error('[categories snapshot ERR]', err.code, err.message); }
+      ),
       onSnapshot(collection(db, ...root, 'kids'), (s) => setKids(s.docs.map(d => ({ id: d.id, ...d.data() })))),
       // Settings: subscribe to PINs belonging to this hub so user can manage them
       onSnapshot(
@@ -2182,8 +2188,8 @@ export default function App() {
     }
   };
 
-  // Resume auto reminder: clear the user override field on daily-notes, so auto bulk reminder shows again
-  const resumeAutoReminder = async () => {
+  // Clear manual reminder note: drops the manual line under auto. Auto reminder (if any) keeps showing.
+  const clearManualReminder = async () => {
     if (!editingNoteKidId || !firebaseRefs) return;
     const { db } = firebaseRefs;
     const ref = doc(db, 'artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids', editingNoteKidId, 'daily-notes', selectedDate);
@@ -2194,16 +2200,16 @@ export default function App() {
         updatedAt: Date.now(),
       });
       setSheetDraft(prev => ({ ...prev, reminder: '' }));
-      showToast('Resumed auto reminder', 'success');
+      showToast('Manual reminder cleared', 'success');
     } catch (e) {
       // If doc doesn't exist yet (no daily-notes), updateDoc throws — fallback to no-op success
       if (e?.code === 'not-found' || /No document/i.test(e?.message || '')) {
         setSheetDraft(prev => ({ ...prev, reminder: '' }));
-        showToast('Resumed auto reminder', 'success');
+        showToast('Manual reminder cleared', 'success');
         return;
       }
-      console.error('Resume auto reminder failed:', e);
-      showToast('Resume failed', 'error');
+      console.error('Clear manual reminder failed:', e);
+      showToast('Clear failed', 'error');
     }
   };
 
@@ -2242,6 +2248,18 @@ export default function App() {
       }, { merge: true });
     }, 500);
   };
+
+  // Refs + auto-grow for free-text notes (textarea shows full content incl. line breaks)
+  const generalNoteRef = useRef(null);
+  const dailyNoteRef = useRef(null);
+  useLayoutEffect(() => {
+    [generalNoteRef, dailyNoteRef].forEach(ref => {
+      const el = ref.current;
+      if (!el) return;
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 'px';
+    });
+  }, [selectedDate, dailyNoteFromDB, meals]);
 
   const addDishToMeal = async (type, name) => {
     if (!name || !name.trim()) {
@@ -2291,9 +2309,15 @@ export default function App() {
   const handleCreateCategory = async () => {
     const val = newCategoryName.trim();
     if (!val) { showToast('Enter a category name', 'warn'); return; }
-    await addDoc(getHubRef('categories'), { name: val, createdAt: Date.now() });
-    setNewCategoryName('');
-    showToast('Already addedCategories', 'success');
+    try {
+      const ref = await addDoc(getHubRef('categories'), { name: val, createdAt: Date.now() });
+      console.log('[addCategory] OK', ref.id);
+      setNewCategoryName('');
+      showToast('Already addedCategories', 'success');
+    } catch (e) {
+      console.error('[addCategory] ERR', e.code, e.message);
+      showToast('Add category failed: ' + (e.code || e.message), 'error');
+    }
   };
 
   const handleEditCategory = async () => {
@@ -2480,8 +2504,9 @@ export default function App() {
               </div>
               <textarea
                 key={selectedDate + '_general'}
+                ref={generalNoteRef}
                 defaultValue={(meals || []).find(m => m.id === `${selectedDate}_general`)?.text || ''}
-                className="w-full bg-transparent border-none outline-none font-bold text-sm text-amber-900 placeholder:text-amber-300 resize-none leading-relaxed"
+                className="w-full bg-transparent border-none outline-none font-bold text-sm text-amber-900 placeholder:text-amber-300 resize-none leading-relaxed block"
                 placeholder=""
                 rows={1}
                 onChange={(e) => {
@@ -2613,12 +2638,13 @@ export default function App() {
                           else value = manual;
                         }
                         if (key === 'reminder') {
+                          // Display order: auto (from profile) + manual note appended on new line
+                          // — manual NEVER overrides auto. Clear the manual note to drop it.
                           const manual = (note.reminder || '').trim();
                           const autoRem = getAutoReminderText(kid.id, selectedDate);
-                          // Display order: user override (if any) > auto
-                          if (manual) value = manual;
+                          if (autoRem && manual) value = `${autoRem}\n${manual}`;
                           else if (autoRem) value = autoRem;
-                          else value = '';
+                          else value = manual;
                         }
                         const hasAuto = (key === 'eca' && !!autoEcaText) || (key === 'reminder' && !!getAutoReminderText(kid.id, selectedDate));
                         return (
@@ -3461,7 +3487,7 @@ export default function App() {
                   </div>
                 ))}
 
-                {/* Reminder — Auto (read-only, if any) + manual override + Resume */}
+                {/* Reminder — Auto (read-only, if any) + manual note (appended on new line) + Clear manual */}
                 <div>
                   <label className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 ${sheetColor.text}`}>
                     <Bell size={12} /> Reminder
@@ -3477,7 +3503,7 @@ export default function App() {
                     </div>
                   )}
                   <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-2">
-                    Reminder note (manual override, optional)
+                    Reminder note (appended below auto, optional)
                   </label>
                   <textarea
                     value={sheetDraft.reminder || ''}
@@ -3486,23 +3512,23 @@ export default function App() {
                     rows={2}
                     className="w-full bg-slate-50 px-4 py-3 rounded-xl font-bold outline-none border border-slate-100 mt-1 text-sm resize-none"
                   />
-                  {sheetAutoReminder && (sheetDraft.reminder || '').trim() && (
+                  {(sheetDraft.reminder || '').trim() && (
                     <button
                       type="button"
-                      onClick={resumeAutoReminder}
+                      onClick={clearManualReminder}
                       className="mt-2 w-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-1.5"
                     >
-                      <RefreshCw size={12} /> Resume auto reminder
+                      <RefreshCw size={12} /> Clear manual note
                     </button>
                   )}
                   <p className="text-[10px] text-slate-400 mt-1 leading-snug">
                     {sheetAutoReminder
-                      ? <>Auto from kid profile stays unless you write a manual override. Click <strong>Resume</strong> above to clear your note and let auto show again.</>
+                      ? <>Auto from kid profile always shows. Your note is appended on a new line below — it never overrides auto. Edit kid profile to change auto.</>
                       : <>No auto reminder from kid profile for today. Add your own here.</>}
                   </p>
                 </div>
 
-                {/* ECA — Auto (read-only, if any) + Note (manual override) */}
+                {/* ECA — Auto (read-only, if any) + Note (appended on new line) */}
                 <div>
                   <label className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 ${sheetColor.text}`}>
                     <ECAIcon size={12} /> ECA
@@ -3518,7 +3544,7 @@ export default function App() {
                     </div>
                   )}
                   <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-2">
-                    ECA note (manual override, optional)
+                    ECA note (appended below auto, optional)
                   </label>
                   <textarea
                     value={sheetDraft.eca || ''}
@@ -3529,7 +3555,7 @@ export default function App() {
                   />
                   <p className="text-[10px] text-slate-400 mt-1 leading-snug">
                     {sheetAutoEcaText
-                      ? <>Auto from kid profile stays regardless of this note. To remove the ECA, edit the kid's profile.</>
+                      ? <>Auto from kid profile always shows. Your note is appended on a new line below — it never overrides auto. Edit kid profile to change auto.</>
                       : <>No ECA scheduled from kid profile for today. Add your own here.</>}
                   </p>
                 </div>
@@ -3842,8 +3868,9 @@ export default function App() {
               </div>
               <textarea
                 key={selectedDate}
+                ref={dailyNoteRef}
                 defaultValue={dailyNoteFromDB}
-                className="w-full bg-transparent border-none outline-none font-bold text-base text-amber-900 placeholder:text-amber-200 resize-none"
+                className="w-full bg-transparent border-none outline-none font-bold text-base text-amber-900 placeholder:text-amber-200 resize-none block"
                 placeholder="What's on today..."
                 onChange={(e) => {
                   updateDayNote(e.target.value, selectedDate);
@@ -4543,9 +4570,6 @@ export default function App() {
                       <div key={dish.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
                         <span className="font-bold text-slate-700 text-xs break-words pr-2">{dish.name}</span>
                         <div className="flex gap-2 flex-shrink-0">
-                          <button onClick={() => deleteDoc(getHubRef('dishes', dish.id))} className="text-slate-200 hover:text-red-500 p-1">
-                            <Trash2 size={14} />
-                          </button>
                           {selectingFor && (
                             <button 
                               onClick={() => addDishToMeal(selectingFor.type, dish.name)} 
@@ -4554,6 +4578,9 @@ export default function App() {
                               Add
                             </button>
                           )}
+                          <button onClick={() => deleteDoc(getHubRef('dishes', dish.id))} className="text-slate-200 hover:text-red-500 p-1">
+                            <Trash2 size={14} />
+                          </button>
                         </div>
                       </div>
                     ))}
