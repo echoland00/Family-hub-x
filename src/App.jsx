@@ -11,7 +11,7 @@ import {
   FileUp, PlusCircle, KeyRound, Zap, FolderPlus, ChevronRight as ChevronRightIcon, Lock, Users2, Copy, UserPlus,
   Tag, LayoutGrid, Info, StickyNote, Send, Download, BookOpen,
   Sun, Users, Baby, School, Shirt, Bus, CalendarDays, GraduationCap, Pencil,
-  Backpack, Bell, PencilLine
+  Backpack, Bell, PencilLine, Check
 } from 'lucide-react';
 
 // Firebase Config
@@ -1075,6 +1075,7 @@ export default function App() {
   const [importPendingList, setImportPendingList] = useState([]);
 
   const [editingRemark, setEditingRemark] = useState(null);
+  const [editingDish, setEditingDish] = useState(null); // { type, index, value, date }
   const [manualInputs, setManualInputs] = useState({});
   const [newGrocery, setNewGrocery] = useState('');
   const [editingCategory, setEditingCategory] = useState(null);
@@ -2288,6 +2289,23 @@ export default function App() {
     const dishToRemove = m.dishes[idx];
     // arrayRemove avoids race conditions when multiple devices edit concurrently
     await updateDoc(getHubRef('meals', id), { dishes: arrayRemove(dishToRemove), lastUpdated: Date.now() });
+    if (editingDish && editingDish.type === type && editingDish.index === idx) setEditingDish(null);
+  };
+
+  const saveDishEdit = async (type, idx) => {
+    if (!editingDish || editingDish.type !== type || editingDish.index !== idx) return;
+    const val = (editingDish.value || '').trim();
+    if (!val) { showToast('Dish name cannot be empty', 'warn'); return; }
+    const id = `${selectedDate}_${type}`;
+    const m = (meals || []).find(x => x.id === id);
+    const existing = Array.isArray(m?.dishes) ? m.dishes : [];
+    if (existing[idx] === val) { setEditingDish(null); return; }
+    const next = existing.map((d, i) => (i === idx ? val : d));
+    await setDoc(getHubRef('meals', id), {
+      date: selectedDate, type, dishes: next, lastUpdated: Date.now()
+    }, { merge: true });
+    setEditingDish(null);
+    showToast('Dish updated', 'success');
   };
 
   const saveMealNote = async (type) => {
@@ -3924,14 +3942,59 @@ export default function App() {
                   </div>
 
                   <div className="space-y-2 mb-4">
-                    {dishList.map((dish, i) => (
-                      <div key={i} className="flex items-center justify-between bg-slate-50 px-4 py-3 rounded-xl border border-slate-100">
-                        <span className="text-sm font-bold text-slate-800 break-words flex-1 pr-2">{dish}</span>
-                        <button onClick={() => removeDish(type, i)} className="text-slate-300 flex-shrink-0">
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ))}
+                    {dishList.map((dish, i) => {
+                      const isDishEdit = editingDish
+                        && editingDish.date === selectedDate
+                        && editingDish.type === type
+                        && editingDish.index === i;
+                      return (
+                        <div key={i} className="flex items-center justify-between gap-2 bg-slate-50 px-4 py-3 rounded-xl border border-slate-100">
+                          {isDishEdit ? (
+                            <>
+                              <input
+                                autoFocus
+                                type="text"
+                                value={editingDish.value}
+                                onChange={(e) => setEditingDish({ ...editingDish, value: e.target.value })}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') saveDishEdit(type, i);
+                                  if (e.key === 'Escape') setEditingDish(null);
+                                }}
+                                className="flex-1 min-w-0 bg-white border border-indigo-200 rounded-lg px-3 py-1.5 text-sm font-bold text-slate-700 outline-none focus:border-indigo-400"
+                              />
+                              <button
+                                onClick={() => saveDishEdit(type, i)}
+                                title="Save dish"
+                                className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg flex-shrink-0"
+                              >
+                                <Check size={14} />
+                              </button>
+                              <button
+                                onClick={() => setEditingDish(null)}
+                                title="Cancel"
+                                className="p-1.5 bg-slate-100 text-slate-400 rounded-lg flex-shrink-0"
+                              >
+                                <X size={14} />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-sm font-bold text-slate-800 break-words flex-1 pr-2">{dish}</span>
+                              <button
+                                onClick={() => setEditingDish({ type, index: i, value: dish, date: selectedDate })}
+                                title="Edit dish"
+                                className="text-slate-400 hover:text-indigo-600 flex-shrink-0"
+                              >
+                                <Pencil size={14} />
+                              </button>
+                              <button onClick={() => removeDish(type, i)} title="Remove dish" className="text-slate-300 hover:text-rose-500 flex-shrink-0">
+                                <X size={14} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
 
                   <div className="bg-slate-100 rounded-xl p-3 border border-slate-200">
