@@ -14,6 +14,9 @@ import {
   Backpack, Bell, PencilLine, Check
 } from 'lucide-react';
 
+import CalendarView from './CalendarView';
+import { KID_COLORS, getECAsForDate, formatECAList, ymdLocal } from './fhxShared';
+
 // Firebase Config
 const firebaseConfig = {
   apiKey: "AIzaSyC0717TOX3YK_Zck6UNIoXFOGMNlhH_FsM",
@@ -27,15 +30,18 @@ const firebaseConfig = {
 const APP_VERSION = "X 0.1.0";
 const MEAL_TYPES = ['Breakfast', 'Lunch', 'Snack', 'Dinner'];
 
-const KID_COLORS = [
-  { name: 'indigo',  bg: 'bg-indigo-100',  text: 'text-indigo-700',  border: 'border-indigo-200',  accent: 'bg-indigo-600' },
-  { name: 'rose',    bg: 'bg-rose-100',    text: 'text-rose-700',    border: 'border-rose-200',    accent: 'bg-rose-500' },
-  { name: 'emerald', bg: 'bg-emerald-100', text: 'text-emerald-700', border: 'border-emerald-200', accent: 'bg-emerald-500' },
-  { name: 'amber',   bg: 'bg-amber-100',   text: 'text-amber-700',   border: 'border-amber-200',   accent: 'bg-amber-500' },
-  { name: 'sky',     bg: 'bg-sky-100',     text: 'text-sky-700',     border: 'border-sky-200',     accent: 'bg-sky-500' },
-];
-
 const KID_GRADES = ['K1','K2','K3','P1','P2','P3','P4','P5','P6','F1','F2','F3','F4','F5','F6'];
+
+// Bottom nav order. The strip is a horizontal slider: 5 tabs visible,
+// the 6th (Hub) is off-screen until you swipe.
+const NAV_TABS = [
+  { id: 'schedule',  label: 'Schedule', Icon: Sun },
+  { id: 'calendar',  label: 'Calendar', Icon: CalendarDays },
+  { id: 'meals',     label: 'Meals',    Icon: Utensils },
+  { id: 'groceries', label: 'Grocery',  Icon: ShoppingCart },
+  { id: 'kids',      label: 'Kids',     Icon: Users },
+  { id: 'settings',  label: 'Hub',      Icon: Fingerprint },
+];
 
 // Self-clear needs_password_setup after successful password login.
 // User proved they have a password by signing in successfully.
@@ -95,47 +101,12 @@ const WEEKDAY_KEYS_FULL = ['sun','mon','tue','wed','thu','fri','sat'];
 const ECAIcon = ({ size = 14, className = '' }) => (
   <span className={className} style={{ fontSize: size, lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>🏓</span>
 );
-const getECAsForDate = (kid, dateInput) => {
-  const list = kid?.eca_recurring || [];
-  if (!list.length) return [];
-  const todayStr = typeof dateInput === 'string'
-    ? dateInput.slice(0, 10)
-    : (dateInput instanceof Date ? dateInput.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10));
-  // New schema (v2): explicit dates array — just lookup
-  const matched = list.filter(eca => {
-    if (!eca?.name) return false;
-    const dates = eca.dates || [];
-    return dates.map(d => String(d).slice(0, 10)).includes(todayStr);
-  });
-  // Sort by start_time ascending; ECAs without start_time go to the end (preserve relative order)
-  const withTime = matched.filter(e => e.start_time);
-  const withoutTime = matched.filter(e => !e.start_time);
-  withTime.sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
-  return [...withTime, ...withoutTime];
-};
-
-const formatECAList = (ecas) => {
-  if (!ecas || !ecas.length) return '';
-  return ecas.map(e => {
-    const time = e.start_time ? `${e.start_time}${e.end_time ? '–' + e.end_time : ''}` : '';
-    return time ? `${e.name} ${time}` : e.name;
-  }).join('; ');
-};
-
 // Combined skip-day set for cycle N-day counter (holidays + exams + special days)
 const getSkipDates = (kid) => [
   ...(kid?.school_holidays || []),
   ...(kid?.exam_dates || []),
   ...(kid?.special_dates || []),
 ];
-
-// Helper: format a Date as YYYY-MM-DD using LOCAL components (NOT toISOString which is UTC).
-const ymdLocal = (d) => {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-};
 
 // Count school days (Mon-Fri, excluding skipDates) between startDate and endDate inclusive
 const countSchoolDays = (startDate, endDate, skipDates = []) => {
@@ -1058,6 +1029,13 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState(null);
 
   const [activeTab, setActiveTab] = useState('schedule');
+  // Calendar tab — visible month + daily-notes loaded for the whole visible grid
+  const [calMonth, setCalMonth] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const [highlightKidId, setHighlightKidId] = useState(null); // kid to scroll to + flash on the Schedule tab
+  // Bottom nav slider — 5 tabs visible, 6th (Hub) off-screen until swiped
+  const navStripRef = useRef(null);
+  const navBtnRefs = useRef({});
+  const [navHint, setNavHint] = useState(false);
   const [meals, setMeals] = useState([]);
   const [groceries, setGroceries] = useState([]);
   const [dishes, setDishes] = useState([]);
@@ -1117,8 +1095,10 @@ export default function App() {
   // So computeKidDiff would otherwise report "no changes" even when reminders were added.
   const originalBulkRemindersRef = useRef(null);
 
-  // Daily notes (ECA / Test / To-bring / Reminder) — per kid per date
-  const [dailyNotes, setDailyNotes] = useState({}); // { [kidId]: { eca, test, to_bring, reminder } }
+  // Daily notes (ECA / Test / To-bring / Reminder) — per kid per date.
+  // Shape: { [kidId]: { [YYYY-MM-DD]: { eca, test, to_bring, reminder, uniform } } }
+  // The whole collection is loaded (not just selectedDate) so the Calendar tab can show a month.
+  const [dailyNotes, setDailyNotes] = useState({});
   const [editingNoteKidId, setEditingNoteKidId] = useState(null);
   const [sheetDraft, setSheetDraft] = useState(null);
 
@@ -1251,19 +1231,21 @@ export default function App() {
     return () => subs.forEach(unsub => unsub());
   }, [user, activeProfile, firebaseRefs, appId]);
 
-  // Subscribe to daily-notes per kid for current selectedDate
+  // Subscribe to daily-notes for every kid (whole collection — the Calendar tab needs all dates)
   useEffect(() => {
     if (!user || !activeProfile || !firebaseRefs || kids.length === 0) return;
     const { db } = firebaseRefs;
     const basePath = ['artifacts', appId, 'public', 'data', 'hubs', activeProfile.hubKey, 'kids'];
     const subs = kids.map(kid => {
-      const ref = doc(db, ...basePath, kid.id, 'daily-notes', selectedDate);
+      const ref = collection(db, ...basePath, kid.id, 'daily-notes');
       return onSnapshot(ref, (snap) => {
-        setDailyNotes(prev => ({ ...prev, [kid.id]: snap.exists() ? snap.data() : {} }));
-      });
+        const map = {};
+        snap.docs.forEach(d => { map[d.id] = d.data(); });
+        setDailyNotes(prev => ({ ...prev, [kid.id]: map }));
+      }, (err) => console.error('[daily-notes ERR]', err.code, err.message));
     });
     return () => subs.forEach(unsub => unsub());
-  }, [user, activeProfile, firebaseRefs, appId, kids, selectedDate]);
+  }, [user, activeProfile, firebaseRefs, appId, kids]);
 
   // Bulk reminders per kid (sub-collection reminders/{YYYY-MM-DD} → auto reminder source)
   const [bulkReminders, setBulkReminders] = useState({}); // { kidId: { 'YYYY-MM-DD': 'text' } }
@@ -1286,6 +1268,41 @@ export default function App() {
     const m = bulkReminders[kidId];
     return (m && m[dateStr]) ? m[dateStr] : null;
   };
+
+  // Calendar → Schedule navigation: jump to a date, optionally flash + scroll to one kid.
+  const kidCardRefs = useRef({});
+  const jumpToSchedule = (dateStr, kidId) => {
+    if (dateStr) setSelectedDate(dateStr);
+    setHighlightKidId(kidId || null);
+    setActiveTab('schedule');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'schedule' || !highlightKidId) return;
+    const t1 = setTimeout(() => {
+      const el = kidCardRefs.current[highlightKidId];
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
+    const t2 = setTimeout(() => setHighlightKidId(null), 3500);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [activeTab, highlightKidId, selectedDate]);
+
+  // Keep the active bottom-nav tab in view inside the slider strip
+  const updateNavHint = () => {
+    const el = navStripRef.current;
+    if (!el) return;
+    setNavHint(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  };
+  useEffect(() => {
+    updateNavHint();
+    window.addEventListener('resize', updateNavHint);
+    return () => window.removeEventListener('resize', updateNavHint);
+  }, []);
+  useEffect(() => {
+    const btn = navBtnRefs.current[activeTab];
+    if (btn && btn.scrollIntoView) btn.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }, [activeTab]);
 
   // Daily Note reads directly from Firestore state (used as initial value for uncontrolled textarea)
   const dailyNoteFromDB = (meals || []).find(m => m.id === `${selectedDate}_planner`)?.note || '';
@@ -2096,7 +2113,7 @@ export default function App() {
 
   // ─── Daily notes (ECA / Test / To-bring / Reminder) ──────────────────────
   const openNoteSheet = (kidId) => {
-    const cur = dailyNotes[kidId] || {};
+    const cur = (dailyNotes[kidId] || {})[selectedDate] || {};
     const sheetKid = kids.find(k => k.id === kidId);
     const autoEcas = sheetKid ? getECAsForDate(sheetKid, selectedDate) : [];
     const autoEcaText = formatECAList(autoEcas);
@@ -2509,7 +2526,7 @@ export default function App() {
         )}
       </header>
 
-      <main className="max-w-lg mx-auto p-4 space-y-6">
+      <main className={`${activeTab === 'calendar' ? 'max-w-3xl' : 'max-w-lg'} mx-auto p-4 space-y-6`}>
         {/* ===== SCHEDULE view ===== */}
         {activeTab === 'schedule' && (
           <div className="space-y-4">
@@ -2549,7 +2566,7 @@ export default function App() {
 
             {kids.map(kid => {
               const color = KID_COLORS.find(c => c.name === kid.color) || KID_COLORS[0];
-              const noteForKid = dailyNotes[kid.id] || {};
+              const noteForKid = (dailyNotes[kid.id] || {})[selectedDate] || {};
               // Dress code display priority: manual override (daily-note.uniform) > ECA dress_code override > auto from schedule
               const uniformAuto = computeUniformForDate(kid, selectedDate);
               // Find ECAs on this date with non-not_specified dress_code (override source)
@@ -2594,7 +2611,11 @@ export default function App() {
                 }
               }
               return (
-                <div key={kid.id} className={`bg-white rounded-[2rem] p-6 shadow-sm border ${color.border}`}>
+                <div
+                  key={kid.id}
+                  ref={(el) => { kidCardRefs.current[kid.id] = el; }}
+                  className={`bg-white rounded-[2rem] p-6 shadow-sm border ${color.border} ${highlightKidId === kid.id ? 'ring-2 ring-indigo-400 ring-offset-2' : ''}`}
+                >
                   <div className="flex items-start gap-3 mb-4">
                     <div className={`w-12 h-12 rounded-full ${color.accent} text-white flex items-center justify-center font-bold text-lg shadow-md flex-shrink-0 overflow-hidden`}>
                       {kid.avatar_data ? (
@@ -2639,7 +2660,7 @@ export default function App() {
                   {/* 4 horizontal long rows: ECA / Test / To-bring / Reminder — Dress code shown as top pill above */}
                   <div className="space-y-2">
                     {(() => {
-                      const note = dailyNotes[kid.id] || {};
+                      const note = (dailyNotes[kid.id] || {})[selectedDate] || {};
                       const rowSpecs = [
                         { key: 'eca',      label: 'ECA',        Icon: ECAIcon },
                         { key: 'test',     label: 'Test',       Icon: GraduationCap },
@@ -2694,6 +2715,20 @@ export default function App() {
               );
             })}
           </div>
+        )}
+
+        {/* ===== CALENDAR view (read-only month grid) ===== */}
+        {activeTab === 'calendar' && (
+          <CalendarView
+            calMonth={calMonth}
+            setCalMonth={setCalMonth}
+            kids={kids}
+            calNotes={dailyNotes}
+            bulkReminders={bulkReminders}
+            meals={meals}
+            todayStr={ymdLocal(new Date())}
+            onJump={jumpToSchedule}
+          />
         )}
 
         {/* ===== KIDS view ===== */}
@@ -4671,42 +4706,36 @@ export default function App() {
         </div>
       )}
 
-      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-xl border-t border-slate-100 px-6 py-5 pb-9 flex justify-between items-center z-40 shadow-xl">
-        <button
-          onClick={() => setActiveTab('schedule')}
-          className={`flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === 'schedule' ? 'text-indigo-600' : 'text-slate-300'}`}
-        >
-          <Sun size={26} strokeWidth={2.5} />
-          <span className="text-[9px] font-bold uppercase">Schedule</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('meals')}
-          className={`flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === 'meals' ? 'text-indigo-600' : 'text-slate-300'}`}
-        >
-          <Utensils size={26} strokeWidth={2.5} />
-          <span className="text-[9px] font-bold uppercase">Meals</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('groceries')}
-          className={`flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === 'groceries' ? 'text-indigo-600' : 'text-slate-300'}`}
-        >
-          <ShoppingCart size={26} strokeWidth={2.5} />
-          <span className="text-[9px] font-bold uppercase">Grocery</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('kids')}
-          className={`flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === 'kids' ? 'text-indigo-600' : 'text-slate-300'}`}
-        >
-          <Users size={26} strokeWidth={2.5} />
-          <span className="text-[9px] font-bold uppercase">Kids</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === 'settings' ? 'text-indigo-600' : 'text-slate-300'}`}
-        >
-          <Fingerprint size={26} strokeWidth={2.5} />
-          <span className="text-[9px] font-bold uppercase">Hub</span>
-        </button>
+      <nav className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none pb-3">
+        <div className="pointer-events-auto relative bg-white/90 backdrop-blur-xl border border-slate-100 rounded-3xl shadow-xl w-[348px] max-w-[calc(100%_-_20px)]">
+          {/* Horizontal slider: 5 tabs visible, the 6th (Hub) appears after swiping */}
+          <div
+            ref={navStripRef}
+            onScroll={updateNavHint}
+            className="no-scrollbar flex items-start gap-1 pt-3 pb-8 px-2 w-[336px] max-w-[calc(100%_-_12px)] overflow-x-auto scroll-smooth"
+          >
+            {NAV_TABS.map(t => (
+              <button
+                key={t.id}
+                ref={(el) => { navBtnRefs.current[t.id] = el; }}
+                onClick={() => setActiveTab(t.id)}
+                className={`flex-none w-[60px] flex flex-col items-center gap-1.5 transition-all active:scale-90 ${activeTab === t.id ? 'text-indigo-600' : 'text-slate-300'}`}
+              >
+                <t.Icon size={26} strokeWidth={2.5} />
+                <span className="text-[9px] font-bold uppercase">{t.label}</span>
+              </button>
+            ))}
+          </div>
+          {navHint && (
+            <button
+              onClick={() => navStripRef.current?.scrollBy({ left: 72, behavior: 'smooth' })}
+              className="absolute right-0 top-2 bottom-7 w-7 flex items-center justify-center text-slate-400 bg-gradient-to-l from-white/95 to-transparent"
+              title="更多"
+            >
+              <ChevronRight size={18} />
+            </button>
+          )}
+        </div>
       </nav>
     </div>
   );
