@@ -190,11 +190,10 @@ export default function CalendarView({
                     <button
                       key={ev.id}
                       onClick={() => onJump(dateStr, ev.kidId)}
-                      title={`${ev.kidName || 'Kid'} · ${ev.kind === 'to_bring' ? 'To-bring' : ev.kind[0].toUpperCase() + ev.kind.slice(1)}\n${ev.text}`}
+                      title={`${ev.kidName || 'Kid'} · ${ev.kind === 'to_bring' ? 'To-bring' : ev.kind[0].toUpperCase() + ev.kind.slice(1)}${ev.locked ? ' (auto)' : ''}\n${ev.text}`}
                       className={`w-full ${ev.color.bg} border ${ev.color.border} rounded px-0.5 py-0.5 flex items-center gap-0.5 active:scale-95 transition-transform`}
                     >
                       <Icon size={8} className={`${ev.color.text} flex-shrink-0 hidden sm:block`} />
-                      {ev.locked && <span className="text-[7px] leading-none flex-shrink-0">🔒</span>}
                       <span className={`text-[9px] font-bold ${ev.color.text} truncate min-w-0`}>{ev.chip}</span>
                     </button>
                   );
@@ -211,8 +210,7 @@ export default function CalendarView({
       </div>
 
       <p className="text-[10px] text-slate-400 text-center leading-relaxed px-4">
-        Tap any chip to jump to that day in Schedule.
-        <br />🔒 = auto reminder from the kid profile.
+        Tap any pill to jump to that day in Schedule.
       </p>
     </div>
   );
