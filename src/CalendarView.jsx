@@ -165,7 +165,7 @@ export default function CalendarView({
             const extra = chips.length - shown.length;
 
             return (
-              <div key={dateStr} className="min-h-[72px] border-r border-b border-slate-100 p-1 flex flex-col gap-0.5 last:border-r-0">
+              <div key={dateStr} className="min-h-[68px] border-r border-b border-slate-100 p-1 flex flex-col gap-0.5 last:border-r-0">
                 <div className="flex items-center justify-between gap-1">
                   <button
                     onClick={() => onJump(dateStr, null)}
@@ -191,11 +191,11 @@ export default function CalendarView({
                       key={ev.id}
                       onClick={() => onJump(dateStr, ev.kidId)}
                       title={`${ev.kidName || 'Kid'} · ${ev.kind === 'to_bring' ? 'To-bring' : ev.kind[0].toUpperCase() + ev.kind.slice(1)}\n${ev.text}`}
-                      className={`w-full ${ev.color.bg} border ${ev.color.border} rounded px-1 py-0.5 flex items-center gap-0.5 active:scale-95 transition-transform`}
+                      className={`w-full ${ev.color.bg} border ${ev.color.border} rounded px-0.5 py-0.5 flex items-center gap-0.5 active:scale-95 transition-transform`}
                     >
-                      <Icon size={8} className={`${ev.color.text} flex-shrink-0`} />
-                      {ev.locked && <span className="text-[7px] leading-none">🔒</span>}
-                      <span className={`hidden sm:inline text-[9px] font-bold ${ev.color.text} truncate`}>{ev.chip}</span>
+                      <Icon size={8} className={`${ev.color.text} flex-shrink-0 hidden sm:block`} />
+                      {ev.locked && <span className="text-[7px] leading-none flex-shrink-0">🔒</span>}
+                      <span className={`text-[9px] font-bold ${ev.color.text} truncate min-w-0`}>{ev.chip}</span>
                     </button>
                   );
                 })}
